@@ -7,7 +7,7 @@ out
 .DS_Store
 
 # runtime logs
-logs/
+/logs/
 *.log
 
 # CIRA flow with a real DB connection string (password) inside -- keep out of git

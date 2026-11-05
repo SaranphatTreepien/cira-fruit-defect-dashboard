@@ -67,7 +67,30 @@ async function writeTransitions(snapshot: HealthSnapshot) {
   }
 }
 
+// Several pages poll this endpoint. Cache the whole snapshot briefly and the slow Internet probe
+// longer, and share one in-flight check, so polling never stacks up network calls.
+const SNAPSHOT_TTL_MS = 3000;
+const INTERNET_TTL_MS = 15000;
+let cached: { at: number; body: HealthSnapshot & { checked_at: string } } | null = null;
+let inflight: Promise<HealthSnapshot & { checked_at: string }> | null = null;
+let internetCache: { at: number; ok: boolean } | null = null;
+
+async function internetCached(): Promise<boolean> {
+  if (internetCache && Date.now() - internetCache.at < INTERNET_TTL_MS) return internetCache.ok;
+  const ok = await checkInternet();
+  internetCache = { at: Date.now(), ok };
+  return ok;
+}
+
 export async function GET() {
+  if (cached && Date.now() - cached.at < SNAPSHOT_TTL_MS) return NextResponse.json(cached.body);
+  inflight ??= check().finally(() => { inflight = null; });
+  const body = await inflight;
+  cached = { at: Date.now(), body };
+  return NextResponse.json(body);
+}
+
+async function check() {
   let db: HealthState = 'offline';
   try {
     await pool.query('SELECT 1');
@@ -76,7 +99,7 @@ export async function GET() {
     db = 'offline';
   }
 
-  const [mqttOnline, internetOnline] = await Promise.all([checkMqtt(), checkInternet()]);
+  const [mqttOnline, internetOnline] = await Promise.all([checkMqtt(), internetCached()]);
   const snapshot: HealthSnapshot = {
     db,
     mqtt: mqttOnline ? 'online' : 'offline',
@@ -91,5 +114,5 @@ export async function GET() {
     }
   }
 
-  return NextResponse.json({ ...snapshot, checked_at: new Date().toISOString() });
+  return { ...snapshot, checked_at: new Date().toISOString() };
 }

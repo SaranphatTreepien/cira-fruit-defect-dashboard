@@ -1,13 +1,13 @@
 'use client';
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   Activity, AlertTriangle, BarChart3, Bell, Bot, Boxes, Camera, Check, ChevronRight, CloudOff,
   Download, FileText, Gauge, History, Info, Leaf, LineChart, LogIn, LogOut, MessageCircle, MoreHorizontal,
   PackageCheck, Pause, Play, Power, Radio, RefreshCcw, Search, Save, Settings2, SlidersHorizontal,
   Sparkles, Square, Tag, Timer, Trash2, TrendingDown, TrendingUp, UserCircle2, Users, Wifi, WifiOff,
-  Zap, CircleDot, Monitor, X, Volume2, VolumeX,
+  Zap, CircleDot, Monitor, X, Volume2, VolumeX, PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react';
 import {
   defectOptions, fruitOptions, mockAlerts, mockDevices, mockFruitEvents,
@@ -16,15 +16,20 @@ import {
 import { fruitProfiles } from '@/data/fruitProfiles';
 import { toCsv } from '@/lib/mockApi';
 
-type ShellStatus = { state: string | null; deviceId: string | null; epm: number | null; model: string | null; mqtt: string; db: string };
-const emptyShellStatus: ShellStatus = { state: null, deviceId: null, epm: null, model: null, mqtt: 'unknown', db: 'unknown' };
+type ShellStatus = { state: string | null; deviceId: string | null; epm: number | null; model: string | null; mqtt: string; db: string; internet: string };
+const emptyShellStatus: ShellStatus = { state: null, deviceId: null, epm: null, model: null, mqtt: 'unknown', db: 'unknown', internet: 'unknown' };
+// Pages that already poll /api/live (Live) report into the shell instead of the shell polling too.
+const ShellContext = createContext<{ status: ShellStatus; report: (patch: Partial<ShellStatus>) => void }>({ status: emptyShellStatus, report: () => undefined });
 
 // Polls real machine + health status once for the whole shell (Topbar / Sidebar).
-function useShellStatus(): ShellStatus {
+function useShellStatus(skipLive: boolean) {
   const [status, setStatus] = useState<ShellStatus>(emptyShellStatus);
+  const skipRef = useRef(skipLive);
+  skipRef.current = skipLive;
   useEffect(() => {
     let active = true;
     const loadLive = async () => {
+      if (skipRef.current) return;
       try {
         const response = await fetch('/api/live?window=5', { cache: 'no-store' });
         if (!response.ok) throw new Error();
@@ -35,16 +40,17 @@ function useShellStatus(): ShellStatus {
     const loadHealth = async () => {
       try {
         const response = await fetch('/api/system-health', { cache: 'no-store' });
-        const payload = await response.json() as { mqtt: string; db: string };
-        if (active) setStatus((current) => ({ ...current, mqtt: payload.mqtt, db: payload.db }));
-      } catch { if (active) setStatus((current) => ({ ...current, mqtt: 'unknown', db: 'unknown' })); }
+        const payload = await response.json() as { mqtt: string; db: string; internet: string };
+        if (active) setStatus((current) => ({ ...current, mqtt: payload.mqtt, db: payload.db, internet: payload.internet }));
+      } catch { if (active) setStatus((current) => ({ ...current, mqtt: 'unknown', db: 'unknown', internet: 'unknown' })); }
     };
     void loadLive(); void loadHealth();
-    const a = window.setInterval(() => { void loadLive(); }, 5000);
-    const b = window.setInterval(() => { void loadHealth(); }, 15000);
+    const a = window.setInterval(() => { if (!document.hidden) void loadLive(); }, 5000);
+    const b = window.setInterval(() => { if (!document.hidden) void loadHealth(); }, 8000);
     return () => { active = false; window.clearInterval(a); window.clearInterval(b); };
   }, []);
-  return status;
+  const report = useMemo(() => (patch: Partial<ShellStatus>) => setStatus((current) => ({ ...current, ...patch })), []);
+  return { status, report };
 }
 const shellPlaying = (state: string | null) => state === 'playing' || state === 'started';
 
@@ -95,11 +101,11 @@ function Sidebar({ current, mobileOpen, onClose, status }: { current: PageKey; m
   return <aside className={`sidebar ${mobileOpen ? 'mobile-open' : ''}`}><div style={{ display: 'flex', alignItems: 'center' }}><Logo /><button className="mobile-close" aria-label="ปิดเมนู" onClick={onClose}><X size={17} /></button></div><div className="nav-label">Workspace</div><nav className="nav-list">{navItems.map(({ href, key, label, icon: Icon }) => <a key={key} href={href} onClick={onClose} aria-label={label} title={label} className={`nav-item ${current === key ? 'active' : ''}`}><Icon className="nav-icon" /><span>{label}</span></a>)}</nav><div className="sidebar-bottom"><div className="system-mini"><div className="system-mini-row"><span><i className={`dot ${lineTone}`} />{status.deviceId ?? 'Camera'}</span><strong>{status.state == null ? 'ไม่ทราบ' : shellPlaying(status.state) ? 'ทำงาน' : 'หยุด'}</strong></div><div className="system-mini-row"><span><i className={`dot ${linkTone}`} />MQTT / DB</span><strong>{status.mqtt === 'online' ? 'on' : status.mqtt === 'offline' ? 'off' : '?'} / {status.db === 'online' ? 'on' : status.db === 'offline' ? 'off' : '?'}</strong></div></div></div></aside>;
 }
 
-function Topbar({ status, online, onOpenMenu, onToggleOnline, unacked, sound, onToggleSound }: { status: ShellStatus; online: boolean; onOpenMenu: () => void; onToggleOnline: () => void; unacked: number; sound: boolean; onToggleSound: () => void }) {
+function Topbar({ status, online, onOpenMenu, onToggleOnline, unacked, sound, onToggleSound, collapsed, onToggleSidebar }: { status: ShellStatus; online: boolean; onOpenMenu: () => void; onToggleOnline: () => void; unacked: number; sound: boolean; onToggleSound: () => void; collapsed: boolean; onToggleSidebar: () => void }) {
   const running = shellPlaying(status.state);
   const router = useRouter();
   const [profileOpen, setProfileOpen] = useState(false);
-  return <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="เปิดเมนู" onClick={onOpenMenu}><SlidersHorizontal size={16} /></button><span className={`status-chip ${running ? 'running' : ''}`}><i className={`dot ${running ? 'good' : 'neutral'}`} />{status.state == null ? 'ไม่ทราบสถานะเครื่อง' : running ? 'เครื่องกำลังทำงาน' : 'เครื่องหยุดอยู่'}</span><button type="button" className={`status-chip ${online ? '' : 'offline'}`} aria-pressed={online} onClick={onToggleOnline} title="จำลอง Online / Offline เฉพาะใน UI"><i className={`dot ${online ? 'good' : 'warn'}`} />{online ? 'Online' : 'Offline'}</button>{status.model && <span className="status-chip" title="model_version ของ event ล่าสุด">Model · {status.model}</span>}</div><div className="topbar-right"><div className="status-cluster"><Activity size={14} color="#1aa55c" /><span style={{ color: '#6e8579', fontSize: 11 }}>Throughput <strong style={{ color: '#10352a' }}>{status.epm == null ? '-' : `${status.epm} ผล/นาที`}</strong></span></div><div className="topbar-separator" /><button type="button" className="topbar-icon" onClick={onToggleSound} aria-pressed={sound} title={sound ? 'ปิดเสียง / desktop notification' : 'เปิดเสียง + desktop notification เมื่อมี alert'}>{sound ? <Volume2 size={16} /> : <VolumeX size={16} />}</button><a href="/alerts" className="topbar-icon bell" title={`${unacked} alert ยังไม่รับทราบ`} aria-label={`Alert ยังไม่รับทราบ ${unacked} รายการ`}><Bell size={16} />{unacked > 0 && <span className="bell-badge">{unacked > 99 ? '99+' : unacked}</span>}</a><div className="topbar-separator" /><div className="profile-menu"><button type="button" className="user-pill profile-trigger" aria-expanded={profileOpen} onClick={() => setProfileOpen((open) => !open)}><div className="avatar">NP</div><div className="user-copy"><strong>Narin P.</strong><span>Operator</span></div><ChevronRight className={profileOpen ? 'profile-chevron open' : 'profile-chevron'} size={15} /></button>{profileOpen && <div className="profile-dropdown"><div className="profile-dropdown-head"><strong>Narin P.</strong><span>operator@ciracore.ai</span></div><button type="button" onClick={() => router.push('/users')}><UserCircle2 size={15} />จัดการโปรไฟล์</button><button type="button" className="profile-logout" onClick={() => router.push('/login')}><LogOut size={15} />Logout</button></div>}</div></div></header>;
+  return <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="เปิดเมนู" onClick={onOpenMenu}><SlidersHorizontal size={16} /></button><button type="button" className="topbar-icon sidebar-toggle" onClick={onToggleSidebar} aria-pressed={collapsed} aria-label={collapsed ? 'ขยายแถบเมนู' : 'ย่อแถบเมนู'} title={collapsed ? 'ขยายแถบเมนู' : 'ย่อแถบเมนู'}>{collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button><span className={`status-chip ${running ? 'running' : ''}`}><i className={`dot ${running ? 'good' : 'neutral'}`} />{status.state == null ? 'ไม่ทราบสถานะเครื่อง' : running ? 'เครื่องกำลังทำงาน' : 'เครื่องหยุดอยู่'}</span><button type="button" className={`status-chip ${online ? '' : 'offline'}`} aria-pressed={online} onClick={onToggleOnline} title="จำลอง Online / Offline เฉพาะใน UI"><i className={`dot ${online ? 'good' : 'warn'}`} />{online ? 'Online' : 'Offline'}</button>{status.model && <span className="status-chip" title="model_version ของ event ล่าสุด">Model · {status.model}</span>}</div><div className="topbar-right"><div className="status-cluster"><Activity size={14} color="#1aa55c" /><span style={{ color: '#6e8579', fontSize: 11 }}>Throughput <strong style={{ color: '#10352a' }}>{status.epm == null ? '-' : `${status.epm} ผล/นาที`}</strong></span></div><div className="topbar-separator" /><button type="button" className="topbar-icon" onClick={onToggleSound} aria-pressed={sound} title={sound ? 'ปิดเสียง / desktop notification' : 'เปิดเสียง + desktop notification เมื่อมี alert'}>{sound ? <Volume2 size={16} /> : <VolumeX size={16} />}</button><a href="/alerts" className="topbar-icon bell" title={`${unacked} alert ยังไม่รับทราบ`} aria-label={`Alert ยังไม่รับทราบ ${unacked} รายการ`}><Bell size={16} />{unacked > 0 && <span className="bell-badge">{unacked > 99 ? '99+' : unacked}</span>}</a><div className="topbar-separator" /><div className="profile-menu"><button type="button" className="user-pill profile-trigger" aria-expanded={profileOpen} onClick={() => setProfileOpen((open) => !open)}><div className="avatar">NP</div><div className="user-copy"><strong>Narin P.</strong><span>Operator</span></div><ChevronRight className={profileOpen ? 'profile-chevron open' : 'profile-chevron'} size={15} /></button>{profileOpen && <div className="profile-dropdown"><div className="profile-dropdown-head"><strong>Narin P.</strong><span>operator@ciracore.ai</span></div><button type="button" onClick={() => router.push('/users')}><UserCircle2 size={15} />จัดการโปรไฟล์</button><button type="button" className="profile-logout" onClick={() => router.push('/login')}><LogOut size={15} />Logout</button></div>}</div></div></header>;
 }
 
 
@@ -148,7 +154,7 @@ function useAlertFeed() {
       } catch { /* feed is best-effort; the Alerts page shows errors */ }
     };
     void load();
-    const id = window.setInterval(() => { void load(); }, 4000);
+    const id = window.setInterval(() => { if (!document.hidden) void load(); }, 4000);
     return () => { active = false; window.clearInterval(id); };
   }, []);
   return { unacked, toasts, dismiss, sound, toggleSound };
@@ -184,9 +190,13 @@ function AlertToasts({ toasts, dismiss }: { toasts: FeedAlert[]; dismiss: (id: n
 }
 
 function Shell({ current, children, online, setOnline, mobileOpen, setMobileOpen }: { current: PageKey; children: React.ReactNode; online: boolean; setOnline: (value: boolean) => void; mobileOpen: boolean; setMobileOpen: (value: boolean) => void }) {
-  const status = useShellStatus();
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => { setCollapsed(window.localStorage.getItem('cira-core-sidebar') === 'collapsed'); }, []);
+  const toggleSidebar = () => setCollapsed((value) => { window.localStorage.setItem('cira-core-sidebar', value ? 'open' : 'collapsed'); return !value; });
+  const shell = useShellStatus(current === 'simulate');
+  const status = shell.status;
   const feed = useAlertFeed();
-  return <div className="app-shell"><Sidebar current={current} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} status={status} /><div className="main-shell"><Topbar status={status} online={online} onOpenMenu={() => setMobileOpen(true)} onToggleOnline={() => setOnline(!online)} unacked={feed.unacked} sound={feed.sound} onToggleSound={feed.toggleSound} /><AlertToasts toasts={feed.toasts} dismiss={feed.dismiss} />{children}</div></div>;
+  return <ShellContext.Provider value={shell}><div className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''}`}><Sidebar current={current} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} status={status} /><div className="main-shell"><Topbar status={status} online={online} onOpenMenu={() => setMobileOpen(true)} onToggleOnline={() => setOnline(!online)} unacked={feed.unacked} sound={feed.sound} onToggleSound={feed.toggleSound} collapsed={collapsed} onToggleSidebar={toggleSidebar} /><AlertToasts toasts={feed.toasts} dismiss={feed.dismiss} />{children}</div></div></ShellContext.Provider>;
 }
 
 function MetricCard({ label, value, foot, tone, icon }: { label: string; value: string | number; foot?: string; tone?: 'green' | 'orange'; icon?: React.ReactNode }) {
@@ -225,7 +235,8 @@ const liveKind = (event: LiveEvent): 'good' | 'defect' => event.external_result 
 function SimulateView({ online, setOnline, setRunning }: { online: boolean; setOnline: (value: boolean) => void; setRunning: (value: boolean) => void }) {
   const [windowMin, setWindowMin] = useState(15);
   const [live, setLive] = useState<LiveData | null>(null);
-  const [health, setHealth] = useState<LiveHealth>({ db: 'unknown', mqtt: 'unknown', internet: 'unknown' });
+  const shell = useContext(ShellContext);
+  const health: LiveHealth = { db: shell.status.db, mqtt: shell.status.mqtt, internet: shell.status.internet };
   const [error, setError] = useState('');
   const [queue, setQueue] = useState<LiveToken[]>([]);
   const [tokens, setTokens] = useState<LiveToken[]>([]);
@@ -257,6 +268,7 @@ function SimulateView({ online, setOnline, setRunning }: { online: boolean; setO
         const nowState = payload.device?.state ?? 'offline';
         const nowPlaying = nowState === 'playing' || nowState === 'started';
         setRunning(nowPlaying);
+        shell.report({ state: nowState, deviceId: payload.device?.device_id ?? null, epm: payload.events_last_minute, model: payload.recent[0]?.model_version ?? null });
         if (seen.current && nowPlaying) {
           const fresh = payload.recent.filter((event) => !seen.current?.has(event.event_id) && Date.parse(event.ts ?? '') >= newestTs.current).reverse();
           if (fresh.length) {
@@ -276,24 +288,10 @@ function SimulateView({ online, setOnline, setRunning }: { online: boolean; setO
       }
     };
     void load();
-    const id = window.setInterval(() => { void load(); }, 2000);
+    const id = window.setInterval(() => { if (!document.hidden) void load(); }, 2000);
     return () => { active = false; window.clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [windowMin, setRunning]);
-
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      try {
-        const response = await fetch('/api/system-health', { cache: 'no-store' });
-        if (!response.ok) return;
-        const payload = await response.json() as LiveHealth;
-        if (active) setHealth({ db: payload.db, mqtt: payload.mqtt, internet: payload.internet });
-      } catch { if (active) setHealth({ db: 'unknown', mqtt: 'unknown', internet: 'unknown' }); }
-    };
-    void load();
-    const id = window.setInterval(() => { void load(); }, 5000);
-    return () => { active = false; window.clearInterval(id); };
-  }, []);
 
   // Release queued events onto the belt one at a time.
   useEffect(() => {
@@ -505,7 +503,7 @@ function LogsView() {
     };
     setLoading(true);
     void load();
-    const id = autoRefresh && relative ? window.setInterval(() => { void load(); }, 10000) : undefined;
+    const id = autoRefresh && relative ? window.setInterval(() => { if (!document.hidden) void load(); }, 10000) : undefined;
     return () => { active = false; if (id) window.clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramKey, preset, customFrom, customTo, autoRefresh]);
@@ -679,7 +677,7 @@ function AlertsView() {
   };
   useEffect(() => {
     void loadAlerts();
-    const id = window.setInterval(() => { void loadAlerts(); }, 5000);
+    const id = window.setInterval(() => { if (!document.hidden) void loadAlerts(); }, 5000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, status, level]);
@@ -687,7 +685,7 @@ function AlertsView() {
     fetch('/api/alert-rules', { cache: 'no-store' }).then((r) => r.json()).then((p: { rules: Partial<AlertRules> | null }) => setRules(Object.fromEntries(Object.entries(defaultAlertRules).map(([k, v]) => [k, { ...v, ...(p.rules?.[k as keyof AlertRules] ?? {}) }])) as AlertRules)).catch(() => setRulesMsg('โหลดกฎไม่สำเร็จ'));
     const loadDaily = () => fetch('/api/reports/daily?days=7', { cache: 'no-store' }).then((r) => r.json()).then((p: { days: DailyRow[]; run_history_since: string | null }) => { setDaily(p.days ?? []); setRunSince(p.run_history_since); }).catch(() => undefined);
     void loadDaily();
-    const id = window.setInterval(() => { void loadDaily(); }, 60000);
+    const id = window.setInterval(() => { if (!document.hidden) void loadDaily(); }, 60000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -854,7 +852,7 @@ function SystemView() {
     };
 
     void load();
-    const interval = window.setInterval(() => { void load(); }, 2000);
+    const interval = window.setInterval(() => { if (!document.hidden) void load(); }, 2000);
     return () => {
       active = false;
       window.clearInterval(interval);
