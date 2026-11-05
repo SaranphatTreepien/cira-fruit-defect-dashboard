@@ -255,6 +255,164 @@ def tool_device_history(limit=10):
                          "lasted_sec": num(r["dur"], 0)} for r in rows]}
 
 
+def _rate(d, t):
+    return (d / t * 100) if t else None
+
+
+def _two_prop_z(d1, n1, d2, n2):
+    """z-score of rate1 vs rate2 (two-proportion test). |z| >= 2 ~ unlikely to be chance."""
+    if n1 < 20 or n2 < 20:
+        return None
+    p = (d1 + d2) / (n1 + n2)
+    se = (p * (1 - p) * (1 / n1 + 1 / n2)) ** 0.5
+    return None if se == 0 else round(((d1 / n1) - (d2 / n2)) / se, 2)
+
+
+def _slope(points):
+    """Least-squares slope of y over x (x in hours). Returns None for < 3 points."""
+    if len(points) < 3:
+        return None
+    n = len(points)
+    mx = sum(x for x, _ in points) / n
+    my = sum(y for _, y in points) / n
+    den = sum((x - mx) ** 2 for x, _ in points)
+    return None if den == 0 else sum((x - mx) * (y - my) for x, y in points) / den
+
+
+def tool_assess():
+    """Situation assessment + short-term forecast: recent vs baseline defect rate (with significance),
+    hourly trend, model confidence drift, defect streaks, throughput run-rate projection, machine stops."""
+    w = db.one(f"""SELECT
+        count(*) FILTER (WHERE ts >= now() - interval '30 minutes')::int AS n30,
+        count(*) FILTER (WHERE ts >= now() - interval '30 minutes' AND external_result = 'defect')::int AS d30,
+        count(*) FILTER (WHERE ts >= now() - interval '60 minutes' AND ts < now() - interval '30 minutes')::int AS nprev,
+        count(*) FILTER (WHERE ts >= now() - interval '60 minutes' AND ts < now() - interval '30 minutes' AND external_result = 'defect')::int AS dprev,
+        count(*) FILTER (WHERE ts >= {PERIODS['today'][0]})::int AS ntoday,
+        count(*) FILTER (WHERE ts >= {PERIODS['today'][0]} AND external_result = 'defect')::int AS dtoday,
+        count(*) FILTER (WHERE ts >= {PERIODS['yesterday'][0]} AND ts < {PERIODS['yesterday'][1]})::int AS nyest,
+        count(*) FILTER (WHERE ts >= {PERIODS['yesterday'][0]} AND ts < {PERIODS['yesterday'][1]} AND external_result = 'defect')::int AS dyest,
+        count(*) FILTER (WHERE ts >= now() - interval '7 days')::int AS n7,
+        count(*) FILTER (WHERE ts >= now() - interval '7 days' AND external_result = 'defect')::int AS d7,
+        avg(confidence) FILTER (WHERE ts >= now() - interval '30 minutes') AS conf30,
+        avg(confidence) FILTER (WHERE ts >= now() - interval '7 days') AS conf7,
+        avg(confidence) FILTER (WHERE ts >= now() - interval '30 minutes' AND external_result = 'good') AS conf30_good,
+        avg(confidence) FILTER (WHERE ts >= now() - interval '30 minutes' AND external_result = 'defect') AS conf30_defect,
+        count(*) FILTER (WHERE ts >= now() - interval '30 minutes' AND confidence < 0.6)::int AS low30,
+        count(*) FILTER (WHERE ts >= now() - interval '10 minutes')::int AS n10
+      FROM fruit_events WHERE ts >= now() - interval '7 days'""")
+    hourly = db.rows(f"""SELECT extract(epoch FROM date_trunc('hour', ts)) / 3600 AS h,
+                                to_char(date_trunc('hour', ts AT TIME ZONE 'Asia/Bangkok'), 'HH24:00') AS hour,
+                                count(*)::int AS n, count(*) FILTER (WHERE external_result = 'defect')::int AS d
+                         FROM fruit_events WHERE ts >= {PERIODS['today'][0]} GROUP BY 1, 2 ORDER BY 1""")
+    seq = db.rows("SELECT external_result FROM fruit_events ORDER BY ts DESC, event_id DESC LIMIT 200")
+    stops = db.one(f"""SELECT count(*) FILTER (WHERE to_state = 'offline' AND from_state IN ('playing', 'started'))::int AS stops
+                       FROM device_state_log WHERE ts >= {PERIODS['today'][0]}""")
+    run_today = tool_production("today")["machine_run_minutes"]
+    status = tool_status()
+
+    # longest defect streak in the last 200 fruits (clusters hint at a bad batch / lighting / camera issue)
+    longest = cur = 0
+    for r in reversed(seq):
+        cur = cur + 1 if r["external_result"] == "defect" else 0
+        longest = max(longest, cur)
+    base_rate = _rate(w["d7"], w["n7"])
+    expected_streak = None
+    if base_rate and 0 < base_rate < 100 and seq:
+        import math
+        p = base_rate / 100
+        expected_streak = round(math.log(len(seq) * (1 - p)) / -math.log(p), 1) if p < 1 and len(seq) * (1 - p) > 1 else None
+
+    pts = [(float(h["h"]), h["d"] / h["n"] * 100) for h in hourly if h["n"] >= 20]
+    slope = _slope([(x - pts[0][0], y) for x, y in pts]) if pts else None
+    per_min = w["n10"] / 10 if w["n10"] else 0.0
+    recent_rate = _rate(w["d30"], w["n30"])
+    proj_rate = recent_rate if recent_rate is not None else base_rate
+    conf = lambda v: None if v is None else round(float(v) * 100 if float(v) <= 1 else float(v), 1)
+
+    z_recent_vs_7d = _two_prop_z(w["d30"], w["n30"], w["d7"] - w["d30"], w["n7"] - w["n30"])
+    z_today_vs_yest = _two_prop_z(w["dtoday"], w["ntoday"], w["dyest"], w["nyest"])
+
+    # deterministic verdict (the AI explains it; it does not invent it)
+    findings, level = [], "ok"
+
+    def flag(lvl, text):
+        nonlocal level
+        findings.append(text)
+        if ["ok", "watch", "problem"].index(lvl) > ["ok", "watch", "problem"].index(level):
+            level = lvl
+
+    if w["n30"] < 20:
+        flag("watch", "ข้อมูล 30 นาทีล่าสุดน้อย (<20 ผล) การประเมินช่วงล่าสุดยังไม่น่าเชื่อถือ")
+    if z_recent_vs_7d is not None and z_recent_vs_7d >= 3:
+        flag("problem", f"defect 30 นาทีล่าสุดสูงกว่าค่าปกติ 7 วันอย่างมีนัยสำคัญ (z={z_recent_vs_7d})")
+    elif z_recent_vs_7d is not None and z_recent_vs_7d >= 2:
+        flag("watch", f"defect 30 นาทีล่าสุดสูงกว่าปกติ (z={z_recent_vs_7d})")
+    elif z_recent_vs_7d is not None and z_recent_vs_7d <= -2:
+        findings.append(f"defect ช่วงล่าสุดต่ำกว่าปกติ (z={z_recent_vs_7d}) คุณภาพล็อตนี้ดีขึ้น")
+    if slope is not None and slope >= 5 and len(pts) >= 3:
+        flag("watch", f"defect rate วันนี้มีแนวโน้มเพิ่ม ~{slope:.1f} จุด%/ชม.")
+    c30, c7 = conf(w["conf30"]), conf(w["conf7"])
+    if c30 is not None and c7 is not None and c7 - c30 >= 5:
+        flag("watch", f"confidence ลดลงจาก {c7}% เป็น {c30}% (โมเดลไม่มั่นใจขึ้น: แสง/มุมกล้อง/ผลไม้ต่างจากที่เทรน?)")
+    if w["n30"] and w["low30"] / w["n30"] >= 0.2:
+        flag("watch", f"ผลที่ confidence < 60% มี {w['low30']}/{w['n30']} ({w['low30'] / w['n30'] * 100:.0f}%)")
+    if expected_streak and longest >= max(8, expected_streak * 2):
+        flag("watch", f"เสียติดกันยาว {longest} ผล (ปกติคาดไว้ ~{expected_streak}) อาจเป็นล็อตเสียหรือปัญหากล้อง")
+    if stops["stops"] >= 3:
+        flag("watch", f"กล้องหยุดวันนี้ {stops['stops']} ครั้ง")
+    if status["devices"] and all(d["state"] == "offline" for d in status["devices"]):
+        findings.append("ตอนนี้เครื่องหยุดอยู่ การคาดการณ์ throughput เป็นศูนย์จนกว่าจะเปิด")
+    if status["open_alerts"]:
+        flag("watch", f"มี alert เปิดอยู่ {status['open_alerts']} รายการ")
+    if not findings:
+        findings.append("ไม่พบสัญญาณผิดปกติจากข้อมูล")
+
+    return {
+        "verdict": level,  # ok | watch | problem
+        "findings": findings,
+        "defect_rate_pct": {"last_30m": num(recent_rate), "prev_30m": num(_rate(w["dprev"], w["nprev"])), "today": num(_rate(w["dtoday"], w["ntoday"])),
+                            "yesterday": num(_rate(w["dyest"], w["nyest"])), "baseline_7d": num(base_rate)},
+        "samples": {"last_30m": w["n30"], "prev_30m": w["nprev"], "today": w["ntoday"], "yesterday": w["nyest"], "7d": w["n7"]},
+        "significance_z": {"last_30m_vs_7d": z_recent_vs_7d, "today_vs_yesterday": z_today_vs_yest},
+        "hourly_today": [{"hour": h["hour"], "total": h["n"], "defect_rate_pct": num(h["d"] / h["n"] * 100)} for h in hourly],
+        "defect_rate_trend_pp_per_hour": num(slope),
+        "confidence_pct": {"last_30m": c30, "baseline_7d": c7, "last_30m_good": conf(w["conf30_good"]), "last_30m_defect": conf(w["conf30_defect"]),
+                           "low_conf_share_30m_pct": num(w["low30"] / w["n30"] * 100) if w["n30"] else None},
+        "defect_streak": {"longest_in_last_200": longest, "expected_if_random": expected_streak},
+        "forecast_next_60m_if_running": {"fruits_per_min_now": round(per_min, 1), "fruits": round(per_min * 60),
+                                         "expected_defect": round(per_min * 60 * (proj_rate or 0) / 100),
+                                         "defect_rate_pct": num(proj_rate), "basis": "อัตรา 10 นาทีล่าสุด × defect rate 30 นาทีล่าสุด"},
+        "machine_today": {"stops": stops["stops"], "run_minutes": run_today},
+        "machine_now": [d["state"] for d in status["devices"]],
+    }
+
+
+def text_assess_fallback(a):
+    icon = {"ok": "🟢 ปกติ", "watch": "🟠 ควรจับตา", "problem": "🔴 มีปัญหา"}[a["verdict"]]
+    r, f = a["defect_rate_pct"], a["forecast_next_60m_if_running"]
+    lines = [f"🔮 ประเมินสถานการณ์: {icon}",
+             f"defect 30 นาที {r['last_30m']}% · วันนี้ {r['today']}% · เมื่อวาน {r['yesterday']}% · 7 วัน {r['baseline_7d']}%",
+             f"คาด 60 นาทีถัดไป (ถ้ารันต่อ): ~{f['fruits']} ผล เสีย ~{f['expected_defect']}", ""]
+    lines += [f"• {x}" for x in a["findings"]]
+    return "\n".join(lines)
+
+
+def ai_assess():
+    a = tool_assess()
+    prompt = ("ประเมินสถานการณ์ไลน์คัดแยกจาก JSON นี้ (คำนวณไว้แล้ว ห้ามแต่งตัวเลขเพิ่ม):\n"
+              "บรรทัดแรก: ผลประเมิน 🟢 ปกติ / 🟠 ควรจับตา / 🔴 มีปัญหา ให้ตรงกับ verdict\n"
+              "1) เทียบดี/เสีย: ช่วงล่าสุด vs วันนี้ vs เมื่อวาน vs 7 วัน (z >= 2 คือต่างจริง, z < 2 อาจเป็นความบังเอิญ)\n"
+              "2) วิเคราะห์สาเหตุที่เป็นไปได้ (ล็อตผลไม้, กล้อง/แสง, โมเดลไม่มั่นใจ, เครื่องหยุดบ่อย) อิงจาก findings, confidence, streak, trend\n"
+              "3) คาดการณ์ 1 ชั่วโมงถัดไป จาก forecast และ trend บอกด้วยว่าเป็นค่าประมาณ\n"
+              "4) ควรทำอะไร 1-3 ข้อ\nไม่เกิน 15 บรรทัด ข้อความธรรมดา\n\n" + json.dumps(a, ensure_ascii=False, default=str))
+    try:
+        content = gemini([{"role": "user", "parts": [{"text": prompt}]}], tools=False)
+        text = "".join(p.get("text", "") for p in content.get("parts", [])).strip()
+        return ("🔮 " + text) if text else text_assess_fallback(a)
+    except AiError as error:
+        return text_assess_fallback(a) + f"\n\n(AI ไม่ว่าง: {error} · แสดงผลคำนวณอย่างเดียว)"
+
+
 TOOLS = {
     "get_status": (tool_status, "สถานะปัจจุบัน: กล้อง, MQTT, DB, Internet, watcher, ผล/นาที, ความหน่วง, alert ที่เปิดอยู่", {}),
     "get_production": (tool_production, "ยอดคัดแยกตามช่วงเวลา: รวม/ดี/เสีย, defect rate, confidence, ชนิดผลไม้, ประเภทตำหนิ, ชั่วโมงสูงสุด, เวลาเครื่องทำงาน",
@@ -264,6 +422,7 @@ TOOLS = {
     "get_alerts": (tool_alerts, "รายการ alert ย้อนหลัง N ชั่วโมง",
                    {"hours": {"type": "integer", "description": "1-168"}, "only_open": {"type": "boolean", "description": "เฉพาะที่ยังไม่หาย"}}),
     "get_device_history": (tool_device_history, "ประวัติเปิด/ปิดกล้องล่าสุด", {"limit": {"type": "integer", "description": "1-50"}}),
+    "get_assessment": (tool_assess, "ประเมินสถานการณ์และคาดการณ์: defect ช่วงล่าสุดเทียบค่าปกติ (มี z-score), แนวโน้มรายชั่วโมง, confidence, เสียติดกัน, คาดการณ์ 60 นาที", {}),
 }
 
 
@@ -447,16 +606,18 @@ def tg(method, payload=None, timeout=35):
 
 BTN = {
     "status": "📊 สถานะ", "today": "📅 วันนี้", "alerts": "🚨 Alert", "history": "🕘 ประวัติเครื่อง",
+    "assess": "🔮 ประเมิน + คาดการณ์",
     "ai_today": "🤖 AI สรุปวันนี้", "ai_week": "🤖 AI สรุปสัปดาห์", "help": "❓ วิธีใช้",
 }
 KEYBOARD = {"keyboard": [[{"text": BTN["status"]}, {"text": BTN["today"]}], [{"text": BTN["alerts"]}, {"text": BTN["history"]}],
-                         [{"text": BTN["ai_today"]}, {"text": BTN["ai_week"]}], [{"text": BTN["help"]}]],
+                         [{"text": BTN["assess"]}], [{"text": BTN["ai_today"]}, {"text": BTN["ai_week"]}], [{"text": BTN["help"]}]],
             "resize_keyboard": True, "is_persistent": True, "input_field_placeholder": "กดเมนู หรือพิมพ์ถาม AI"}
 COMMANDS = [
     {"command": "status", "description": "สถานะกล้อง / MQTT / DB / Internet"},
     {"command": "today", "description": "ยอดคัดแยกวันนี้"},
     {"command": "alerts", "description": "Alert ที่ยังเปิดอยู่ + รับทราบ"},
     {"command": "history", "description": "ประวัติเปิด/ปิดกล้อง"},
+    {"command": "assess", "description": "ประเมินสถานการณ์ ดี/เสีย + คาดการณ์"},
     {"command": "ai_today", "description": "AI สรุปวันนี้"},
     {"command": "ai_week", "description": "AI สรุป 7 วัน"},
     {"command": "ask", "description": "ถาม AI เช่น /ask ชั่วโมงไหนเสียเยอะสุด"},
@@ -464,7 +625,7 @@ COMMANDS = [
 ]
 HELP = ("<b>CIRA CORE Bot</b>\nกดปุ่มด้านล่าง หรือพิมพ์คำถามได้เลย เช่น\n"
         "• วันนี้เสียกี่เปอร์เซ็นต์\n• ชั่วโมงไหนคัดได้เยอะที่สุด\n• เมื่อวานกล้องดับกี่ครั้ง\n\n"
-        "ปุ่ม 📊📅🚨🕘 ดึงจาก DB ตรง (เร็ว) · ปุ่ม 🤖 และคำถามใช้ Gemini")
+        "ปุ่ม 📊📅🚨🕘 ดึงจาก DB ตรง (เร็ว) · 🔮 คำนวณสถิติแล้วให้ AI วิเคราะห์ + คาดการณ์ · ปุ่ม 🤖 และคำถามใช้ Gemini")
 
 
 def send(text, markup=None, html=True):
@@ -499,6 +660,9 @@ def handle_text(text):
             send(body, markup)
         elif cmd == "/history" or t == BTN["history"]:
             send(text_history())
+        elif cmd == "/assess" or t == BTN["assess"]:
+            typing()
+            send(ai_assess(), html=False)
         elif cmd in ("/ai_today", "/ai_week") or t in (BTN["ai_today"], BTN["ai_week"]):
             typing()
             scope = "week" if cmd == "/ai_week" or t == BTN["ai_week"] else "today"
@@ -627,7 +791,9 @@ if __name__ == "__main__":
         print(text_production("today"), "\n")
         print(text_alerts()[0], "\n")
         print(text_history(), "\n")
+        print(json.dumps(tool_assess(), ensure_ascii=False, indent=1, default=str)[:2500], "\n")
         if "--ai" in sys.argv:
+            print("AI assess:\n", ai_assess(), "\n")
             print("AI summary:\n", ai_summary("today"), "\n")
             print("AI ask:\n", ask_ai("ชั่วโมงไหนวันนี้คัดได้เยอะที่สุด และ defect rate เท่าไร"))
         sys.exit(0)
