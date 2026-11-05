@@ -10,7 +10,8 @@
     "start:web": "next start -H 0.0.0.0 -p 3000",
     "watcher": "python scripts/alert_watcher.py",
     "test:telegram": "python scripts/alert_watcher.py --test-telegram",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bot": "python scripts/telegram_bot.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

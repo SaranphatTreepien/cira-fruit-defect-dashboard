@@ -506,3 +506,6 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 /* System Status health strip: 4 tiles (DB / MQTT / Internet / checked at). Reconstructed after globals.css loss. */
 .health-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 @media (max-width: 840px) { .health-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ===== AI summary card ===== */
+.ai-text { white-space: pre-wrap; line-height: 1.7; font-size: 13px; color: #2f4a3d; background: #f7fbf8; border: 1px solid #e3efe6; border-radius: 12px; padding: 14px 16px; margin-bottom: 8px; }

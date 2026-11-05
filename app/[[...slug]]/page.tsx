@@ -10,7 +10,7 @@ import {
   Zap, CircleDot, Monitor, X, Volume2, VolumeX,
 } from 'lucide-react';
 import {
-  aiAnswers, defectOptions, fruitOptions, mockAlerts, mockDevices, mockFruitEvents,
+  defectOptions, fruitOptions, mockAlerts, mockDevices, mockFruitEvents,
   mockUsers, type AlertItem, type FruitEvent, type FruitProfile, type FruitType,
 } from '@/data/mockData';
 import { fruitProfiles } from '@/data/fruitProfiles';
@@ -54,7 +54,6 @@ const navItems: { href: string; key: PageKey; label: string; sub: string; icon: 
   { href: '/simulate', key: 'simulate', label: 'Live', sub: 'Real-time', icon: Activity },
   { href: '/logs', key: 'logs', label: 'Dashboard Log', sub: 'Traceability', icon: History },
   { href: '/alerts', key: 'alerts', label: 'Alert & Reports', sub: 'Operations', icon: Bell },
-  { href: '/reports', key: 'reports', label: 'Report + AI', sub: 'Intelligence', icon: Bot },
   { href: '/system', key: 'system', label: 'System Status', sub: 'Device health', icon: Wifi },
   { href: '/profiles', key: 'profiles', label: 'Fruit Profiles', sub: 'Configurations', icon: Tag },
   { href: '/users', key: 'users', label: 'Users', sub: 'Access control', icon: Users },
@@ -64,7 +63,7 @@ const navItems: { href: string; key: PageKey; label: string; sub: string; icon: 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string; subtitle: string }> = {
   simulate: { eyebrow: '01 • LIVE', title: 'Live', subtitle: 'สถานะเครื่องและผลคัดแยกแบบ real-time จากฐานข้อมูล' },
   logs: { eyebrow: '02 • TRACEABILITY', title: 'Dashboard Log', subtitle: 'ย้อนดูเหตุการณ์ทุกผลผลิตตั้งแต่ Camera, NIR จนถึงจุดคัดแยก' },
-  alerts: { eyebrow: '03 • OPERATIONS', title: 'Alert และรายงาน', subtitle: 'ติดตามสัญญาณผิดปกติและรายงานประจำกะจากจุดควบคุมเดียว' },
+  alerts: { eyebrow: '03 • OPERATIONS', title: 'Alert, รายงาน + AI', subtitle: 'ติดตามเหตุการณ์ รายงานรายวัน และให้ AI สรุป (เมนูเดียวกับ Telegram bot)' },
   reports: { eyebrow: '04 • INTELLIGENCE', title: 'Report + AI Agent', subtitle: 'สรุปภาพรวมจากข้อมูลการคัดแยก และถาม AI Agent เพื่อช่วยตัดสินใจ' },
   system: { eyebrow: '05 • CONNECTIVITY', title: 'System Status', subtitle: 'มองเห็นสุขภาพของอุปกรณ์ edge และสถานะข้อมูล Offline / Online' },
   profiles: { eyebrow: '06 • CONFIGURATION', title: 'Fruit Profiles', subtitle: 'ตั้งค่า threshold, NIR parameters และความเร็วแยกตามชนิดผลไม้' },
@@ -657,6 +656,17 @@ function AlertsView() {
   const [daily, setDaily] = useState<DailyRow[]>([]); const [runSince, setRunSince] = useState<string | null>(null);
   const [toast, setToast] = useState('');
   const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(''), 2200); };
+  const [ai, setAi] = useState<{ scope: 'today' | 'week'; text: string; at: string; model: string } | null>(null);
+  const [aiLoading, setAiLoading] = useState<'today' | 'week' | null>(null); const [aiError, setAiError] = useState('');
+  const runAi = async (scope: 'today' | 'week') => {
+    setAiLoading(scope); setAiError('');
+    try {
+      const response = await fetch('/api/ai/summary', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope }) });
+      const payload = await response.json() as { text?: string; generated_at?: string; model?: string; error?: string };
+      if (!response.ok || !payload.text) throw new Error(payload.error || 'AI สรุปไม่สำเร็จ');
+      setAi({ scope, text: payload.text, at: payload.generated_at ?? new Date().toISOString(), model: payload.model ?? '' });
+    } catch (runError) { setAiError(runError instanceof Error ? runError.message : 'AI สรุปไม่สำเร็จ'); } finally { setAiLoading(null); }
+  };
 
   const loadAlerts = async () => {
     try {
@@ -767,6 +777,15 @@ function AlertsView() {
       </div>
     </div>
 
+    <div className="card pad ai-card" style={{ marginTop: 18 }}>
+      <SectionHeader title="AI สรุป" kicker="Gemini สรุปจากตัวเลขใน DB (ส่งเฉพาะตัวเลขสรุป) · ใน Telegram กด 🤖 ได้เหมือนกัน" action={<div style={{ display: 'flex', gap: 6 }}>
+        <button type="button" className="btn btn-primary" onClick={() => void runAi('today')} disabled={aiLoading !== null}><Sparkles size={14} /> {aiLoading === 'today' ? 'กำลังสรุป...' : 'สรุปวันนี้'}</button>
+        <button type="button" className="btn btn-ghost" onClick={() => void runAi('week')} disabled={aiLoading !== null}><Sparkles size={14} /> {aiLoading === 'week' ? 'กำลังสรุป...' : 'สรุป 7 วัน'}</button>
+      </div>} />
+      {aiError && <div className="live-banner error">{aiError}</div>}
+      {ai ? <><div className="ai-text">{ai.text}</div><div className="card-kicker">{ai.scope === 'today' ? 'วันนี้' : '7 วัน'} · {alertTime(ai.at)} · {ai.model}</div></> : !aiError && <div className="empty">กดปุ่มเพื่อให้ AI สรุป</div>}
+    </div>
+
     <div className="card pad" style={{ marginTop: 18 }}>
       <SectionHeader title="รายงานรายวัน (7 วัน)" kicker={`จาก fruit_events + device_state_log + alerts · เวลาทำงานเริ่มนับ ${runSince ? alertTime(runSince) : 'เมื่อ watcher ทำงาน'}`} action={<button type="button" className="btn btn-ghost" onClick={exportDaily} disabled={!daily.length}><Download size={14} /> CSV</button>} />
       {today && <div className="summary-strip" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 14 }}>
@@ -781,12 +800,6 @@ function AlertsView() {
     </div>
     {toast && <div className="toast"><Check size={14} style={{ verticalAlign: 'middle', marginRight: 7 }} />{toast}</div>}
   </>;
-}
-
-function ReportsView() {
-  const prompts = Object.keys(aiAnswers); const [messages, setMessages] = useState<{ from: 'ai' | 'user'; text: string }[]>([{ from: 'ai', text: 'สวัสดีครับ Narin — ผมเห็นข้อมูลจาก CIRA CORE edge queue แล้ว วันนี้อยากดูเรื่องไหนเป็นพิเศษครับ?' }]); const [input, setInput] = useState('');
-  const ask = (text: string) => { if (!text.trim()) return; setMessages((items) => [...items, { from: 'user', text }, { from: 'ai', text: aiAnswers[text] || 'จากข้อมูลจำลองตอนนี้ ระบบยังไม่พบสัญญาณผิดปกติที่ชัดเจน แนะนำดู trend ราย 30 นาทีและตรวจ NIR latency ประกอบครับ' }]); setInput(''); };
-  return <><PageHeader page="reports" actions={<button className="btn btn-primary"><Download size={14} /> Export insight</button>} /><div className="report-grid"><div className="section-grid"><div className="metric-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0,1fr))', marginBottom: 0 }}><MetricCard label="Total processed" value="8,420" foot="สัปดาห์นี้" /><MetricCard label="Pass rate" value="92.4%" foot="+1.8% vs last week" tone="green" /><MetricCard label="NIR internal defect" value="3.6%" foot="Apple สูงสุด" tone="orange" /><MetricCard label="Wrong type" value="0.9%" foot="12 events" tone="orange" /></div><div className="card pad"><SectionHeader title="Executive summary" kicker="01 Oct 2026 · 07:00–10:42" /><div className="info-callout"><Sparkles size={16} /><div><strong>ไลน์ทำงานเสถียร แต่ควรจับตา NIR latency</strong><p>อัตราผ่านอยู่เหนือเป้าหมาย 90% อย่างต่อเนื่อง ขณะที่ NIR sensor ตอบสนองช้าขึ้นเป็น 184 ms ทำให้ throughput ช่วง 10:30 ลดลงเล็กน้อย</p></div></div><div className="insight"><TrendingUp size={17} className="insight-icon" /><p><strong>Positive signal:</strong> ส้มมี defect rate ต่ำสุด 4.2% และ confidence เฉลี่ย 98.1%</p></div><div className="insight"><AlertTriangle size={17} style={{ color: '#d36d3f' }} /><p><strong>Action:</strong> ตรวจ calibration ของ NIR และเปลี่ยนตะกร้าเสียภายนอกก่อน capacity แตะ 90%</p></div></div><div className="card pad"><SectionHeader title="Defect mix by fruit" kicker="อัตราเสียภายนอก + ภายใน" /><Bar label="แอปเปิล" value="11.8%" width="86%" color="red" /><div style={{ height: 13 }} /><Bar label="ส้ม" value="6.9%" width="50%" color="orange" /><div style={{ height: 13 }} /><Bar label="กล้วย · external only" value="4.2%" width="31%" color="green" /></div></div><div className="card pad chat-card"><SectionHeader title="Ask AI Agent" kicker="บทสนทนาจำลองจากข้อมูลใน dashboard" action={<button className="btn btn-ghost btn-sm" onClick={() => setMessages([])}><Trash2 size={12} /> Clear</button>} /><div className="chat-body">{messages.map((message, index) => <div key={`${message.from}-${index}`} className={`chat-bubble ${message.from === 'user' ? 'user' : ''}`}><div className="chat-author">{message.from === 'user' ? 'You' : 'CIRA Agent'}</div>{message.text}</div>)}</div><div className="quick-prompts">{prompts.map((prompt) => <button key={prompt} className="prompt" onClick={() => ask(prompt)}>{prompt}</button>)}</div><div className="chat-input"><input className="input" placeholder="ถามเกี่ยวกับไลน์ผลิต..." value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && ask(input)} /><button className="btn btn-primary btn-icon" onClick={() => ask(input)}><MessageCircle size={15} /></button></div></div></div></>;
 }
 
 type DeviceStatus = {
@@ -904,5 +917,5 @@ export default function DashboardPage() {
   const path = pathname === '/' ? 'simulate' : pathname.split('/')[1] || 'simulate'; const known = navItems.some((item) => item.key === path) || path === 'login' || pathname === '/'; const page = (navItems.some((item) => item.key === path) ? path : path === 'login' ? 'login' : 'simulate') as PageKey;
   if (!known) return <NotFoundView />;
   if (page === 'login') return <LoginView />;
-  return <Shell current={page} online={online} setOnline={setOnline} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen}>{<main className="page-wrap">{page === 'simulate' && <SimulateView online={online} setOnline={setOnline} setRunning={setRunning} />}{page === 'logs' && <LogsView />}{page === 'alerts' && <AlertsView />}{page === 'reports' && <ReportsView />}{page === 'system' && <SystemView />}{page === 'profiles' && <ProfilesView profiles={profiles} setProfiles={setProfiles} />}{page === 'users' && <UsersView />}{page === 'myteam' && <MyTeamView />}</main>}</Shell>;
+  return <Shell current={page} online={online} setOnline={setOnline} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen}>{<main className="page-wrap">{page === 'simulate' && <SimulateView online={online} setOnline={setOnline} setRunning={setRunning} />}{page === 'logs' && <LogsView />}{page === 'alerts' && <AlertsView />}{page === 'system' && <SystemView />}{page === 'profiles' && <ProfilesView profiles={profiles} setProfiles={setProfiles} />}{page === 'users' && <UsersView />}{page === 'myteam' && <MyTeamView />}</main>}</Shell>;
 }

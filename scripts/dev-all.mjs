@@ -1,9 +1,11 @@
-// Start the dashboard together with scripts/alert_watcher.py (used by `npm run dev` / `npm run start`).
+// Start the dashboard together with scripts/alert_watcher.py and scripts/telegram_bot.py
+// (used by `npm run dev` / `npm run start`).
 //   node scripts/dev-all.mjs dev     -> next dev   + alert_watcher
 //   node scripts/dev-all.mjs start   -> next start + alert_watcher
 // The watcher is restarted if it exits. Only one watcher works at a time (PostgreSQL advisory lock),
 // so a watcher already running in another terminal is fine: this one waits as a standby.
-// Set PYTHON to choose the interpreter (default: python), NO_WATCHER=1 to skip it.
+// The bot works the same way (its own lock). Set PYTHON to choose the interpreter (default: python),
+// NO_WATCHER=1 / NO_BOT=1 to skip one.
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,18 +37,19 @@ function run(name, command, args, onExit) {
   return child;
 }
 
-function startWatcher() {
-  run('watcher', python, ['-u', path.join('scripts', 'alert_watcher.py')], (code) => {
+function startPython(name, script) {
+  run(name, python, ['-u', path.join('scripts', script)], (code) => {
     if (stopping) return;
-    console.error(`[watcher] exited (code ${code}) · restarting in 5 s`);
-    setTimeout(() => { if (!stopping) startWatcher(); }, 5000);
+    console.error(`[${name}] exited (code ${code}) · restarting in 5 s`);
+    setTimeout(() => { if (!stopping) startPython(name, script); }, 5000);
   });
 }
 
 run('web', process.execPath, [nextBin, mode, '-H', '0.0.0.0', '-p', process.env.PORT || '3000'], (code) => {
   if (!stopping) { console.error(`[web] exited (code ${code})`); shutdown(code ?? 1); }
 });
-if (process.env.NO_WATCHER !== '1') startWatcher();
+if (process.env.NO_WATCHER !== '1') startPython('watcher', 'alert_watcher.py');
+if (process.env.NO_BOT !== '1') startPython('bot', 'telegram_bot.py');
 
 function shutdown(code = 0) {
   if (stopping) return;
