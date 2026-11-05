@@ -1,0 +1,13 @@
+{
+  "routes": [
+    { "path": "/", "title": "Simulate + Control" },
+    { "path": "/simulate", "title": "Simulate + Control" },
+    { "path": "/logs", "title": "Dashboard Log" },
+    { "path": "/alerts", "title": "Alert และรายงาน" },
+    { "path": "/reports", "title": "Report + AI Agent" },
+    { "path": "/system", "title": "System Status" },
+    { "path": "/profiles", "title": "Fruit Profiles" },
+    { "path": "/users", "title": "User Management" },
+    { "path": "/login", "title": "Login" }
+  ]
+}

@@ -1,0 +1,398 @@
+สถานะล่าสุดของโปรเจกต์ CIRA CORE Fruit Defect Sorter & Counter
+ตรวจจากโค้ดใน workspace และ PostgreSQL จริง: 2026-11-04
+
+หมายเหตุ
+- รายงานนี้เขียนจากสิ่งที่พบในไฟล์และผลตรวจฐานข้อมูลจริงเท่านั้น
+- ไม่ใส่รหัสผ่านหรือค่าลับจาก .env/.env.local
+- PostgreSQL ที่ตรวจคือ container cira-db และฐานข้อมูล cira_core
+
+1. ระบบทำอะไรได้แล้ว (CIRA -> MQTT -> script -> DB)
+
+Flow หลักที่มีโค้ดรองรับ:
+
+1) CIRA CORE หรือเครื่องมือทดสอบสร้าง JSON event ตาม contract ที่มี event_id,
+   timestamp, external_result และข้อมูลผลไม้/โมเดลอื่น ๆ
+2) CIRA CORE ส่ง event ไป MQTT topic cira/fruit/events ผ่าน Mosquitto
+   (docker-compose.yml เปิด broker ที่ port 1883 และ mosquitto.conf อนุญาต
+   anonymous สำหรับ DEV)
+3) scripts/mqtt_to_db.py ใช้ MQTT client id cira-writer, subscribe topic
+   ด้วย QoS 1, รับได้ทั้ง event เดี่ยวและ object ที่มี events เป็น array
+4) script ตรวจ JSON, event_id, timestamp, external_result และ confidence
+   แล้วสะสมเป็น batch ก่อน INSERT ลง fruit_events
+5) การเขียน batch ใช้ transaction และ ON CONFLICT(event_id) DO NOTHING
+   จึงกัน event ซ้ำได้; จะ ack MQTT หลังเขียน DB สำเร็จ
+6) ถ้า lookup fruit_type, defect_type หรือ model_version ไม่พบ จะเก็บค่า
+   column เป็น NULL และเก็บ JSON เดิมไว้ใน raw พร้อม log เตือน
+7) ข้อความเสียจะถูก ack เพื่อไม่ให้ค้างวน และ script พยายามเขียน warning
+   ลง system_logs
+8) mqtt_to_db.py เปิด scripts/mqtt_status.py เป็น child process และ restart
+   ให้เมื่อ process สถานะหยุด
+9) mqtt_status.py subscribe cira/fruit/status/# และ UPSERT device_status
+   ทันที โดยใช้ connection DB แยกจาก event batch
+10) Dashboard เรียก app/api/dashboard ซึ่งอ่าน fruit_events และ system_logs
+    จาก PostgreSQL แล้วแปลงเป็นข้อมูลสำหรับหน้าเว็บ
+
+สิ่งที่ยืนยันได้จาก DB จริง ณ เวลาตรวจ:
+- fruit_events มี 478 แถว ทั้งหมดเป็น fruit_type=orange,
+  model_version=quick-v0.1, model_source=quick
+- event แบ่งเป็น external_result=defect จำนวน 299 และ good จำนวน 179
+- device_status มี 1 แถว: device_id=CAM_01, source_type=video,
+  state ที่เก็บคือ playing
+- system_logs, run_sessions และ settings ยังไม่มีแถว
+- มี log ของ mqtt_to_db.py ที่แสดงการเชื่อม MQTT และรับ/เขียน event
+
+2. ไฟล์/สคริปต์แต่ละตัวทำหน้าที่อะไร
+
+เว็บ Next.js
+- app/layout.tsx: root layout และ metadata ของเว็บ
+- app/globals.css: style หลักของ Dashboard
+- app/[[...slug]]/page.tsx: หน้า Dashboard แบบ catch-all รวม Simulate,
+  Dashboard Log, Alert & Reports, Report + AI, System Status, Fruit Profiles,
+  Users, My Team และ Login ไว้ในไฟล์เดียว
+- app/api/dashboard/route.ts: query fruit_events และ system_logs จาก DB
+  แล้วส่ง DashboardData; กรอง event เป็น fruit_type=orange และ limit 500
+- app/api/ingest/route.ts: HTTP POST รับ event JSON แล้ว INSERT fruit_events
+  โดยตรวจ lookup และกัน event_id ซ้ำ; จากโค้ดที่พบยังไม่ถูกเรียกจาก Dashboard
+- db/pool.ts และ src/db/pool.ts: สร้าง PostgreSQL connection pool;
+  route ใช้ db/pool.ts ส่วน src/db/pool.ts ไม่พบการ import ในโค้ดหน้าเว็บ
+- src/components/ui.tsx: component Panel และ SectionLabel
+- src/data/mockData.ts: type, event, alert, device, user และคำตอบ AI จำลอง
+- src/data/fruitProfiles.ts: ค่า profile จำลองของส้ม แอปเปิล และกล้วย
+- src/hooks/useSimulation.ts: hook เก็บ mismatch window แต่ไม่พบการถูกใช้ใน
+  app/[[...slug]]/page.tsx
+- src/lib/dashboardData.ts: type และค่าเริ่มต้นของข้อมูลจาก Dashboard API
+- src/lib/mockApi.ts: filter, summarize และ export CSV สำหรับข้อมูล event
+- src/lib/types.ts: re-export type จาก mockData.ts
+- app.config.ts: config logo URL แบบ dummy; ไม่พบการ import ใน source
+- next.config.mjs, tsconfig.json, postcss.config.mjs, tailwind.config.ts:
+  config ของ Next.js/TypeScript/PostCSS/Tailwind
+- package.json และ package-lock.json: dependency และคำสั่ง dev, build,
+  start, typecheck
+
+ฐานข้อมูล
+- db/schema_core.sql: สร้าง schema ตั้งต้นและ seed fruit_types กับ models
+- db/migration_001_names.sql: เพิ่มชื่อภาษาอังกฤษ/จีนใน fruit_types และ
+  defect_types
+- db/seed_defects.sql: seed defect_types bruise, rot, crack
+
+Python/MQTT และเครื่องมือทดสอบ
+- scripts/mqtt_to_db.py: MQTT event consumer แบบ batch -> fruit_events,
+  retry เมื่อ DB ล่ม, duplicate protection, bad-message logging และเปิด
+  mqtt_status.py เป็น process ลูก
+- scripts/mqtt_status.py: MQTT status consumer -> device_status แบบ UPSERT
+- scripts/test_insert.py: ทดสอบ INSERT event เข้า DB โดยตรงจาก Python
+- scripts/mock-send.ps1: ยิง event จำลองเข้า HTTP endpoint
+  http://localhost:3000/api/ingest จำนวน 10 event
+- scripts/watch-db.ps1: แสดง event ล่าสุดจาก fruit_events ซ้ำตาม interval
+- mosquitto/mosquitto.conf: broker listener, persistence และ queue limits
+- docker-compose.yml: service PostgreSQL, Adminer และ Mosquitto
+
+Flow/เอกสาร/ไฟล์ประกอบ
+- testSentMQTTandPosgrestoDOCKER.npj: flow CiRA CORE สำหรับทดสอบส่ง MQTT
+  และเขียน PostgreSQL โดยตรง
+- Demo_Detect_Orange with POK.npj และ testTrain.npj: ไฟล์ flow/project
+  ของ CiRA CORE; จากชื่อและไฟล์ที่มีอยู่ยังยืนยันรายละเอียดการทำงานภายใน
+  ทั้งหมดไม่ได้ จึงไม่แน่ใจในรายละเอียดภายใน
+- DOC/: คู่มือ, path, แผนงาน และ progress ที่บันทึกการทดสอบเดิม
+- public/images/: logo และรูปทีมที่หน้าเว็บใช้
+- public/manus-routes.json: route configuration ที่เกี่ยวข้องกับ Manus
+- logs/mqtt_to_db.log และ logs/mqtt_status.log: log runtime ของตัวรับ
+- next-dev.log และ next-dev-error.log: log ของ Next.js development server
+
+3. DB เก็บอะไรบ้าง (ตรวจจาก PostgreSQL จริง)
+
+ฐานข้อมูลจริงมี 8 tables และ 1 view ใน schema public
+
+TABLE fruit_types
+- code TEXT (PRIMARY KEY, NOT NULL)
+- name_th TEXT
+- icon TEXT
+- name_en TEXT
+- name_zh TEXT
+
+TABLE defect_types
+- code TEXT (PRIMARY KEY, NOT NULL)
+- name_th TEXT
+- group_no INTEGER
+- name_en TEXT
+- name_zh TEXT
+
+TABLE models
+- model_version TEXT (PRIMARY KEY, NOT NULL)
+- model_source TEXT (NOT NULL; schema ระบุค่า mock/quick/team)
+- precision REAL
+- recall REAL
+- map REAL
+- threshold REAL
+- created_at TIMESTAMPTZ (NOT NULL)
+
+TABLE run_sessions
+- session_id TEXT (PRIMARY KEY, NOT NULL)
+- started_at TIMESTAMPTZ (NOT NULL)
+- stopped_at TIMESTAMPTZ
+- status TEXT (NOT NULL)
+- params JSONB
+
+TABLE fruit_events
+- event_id TEXT (PRIMARY KEY, NOT NULL)
+- ts TIMESTAMPTZ (NOT NULL)
+- fruit_type TEXT
+- external_result TEXT
+- defect_type TEXT
+- nir_result TEXT
+- confidence REAL
+- camera_view TEXT
+- model_version TEXT
+- model_source TEXT
+- session_id TEXT
+- synced BOOLEAN (NOT NULL)
+- raw JSONB
+- created_at TIMESTAMPTZ (NOT NULL)
+- track_id INTEGER
+
+หมายเหตุ: track_id พบใน DB จริง แต่ไม่พบใน db/schema_core.sql ฉบับที่อ่าน
+
+TABLE system_logs
+- id BIGINT (BIGSERIAL, PRIMARY KEY, NOT NULL)
+- ts TIMESTAMPTZ (NOT NULL)
+- level TEXT (NOT NULL)
+- source TEXT
+- message TEXT
+
+TABLE settings
+- key TEXT (PRIMARY KEY, NOT NULL)
+- value JSONB (NOT NULL)
+- updated_at TIMESTAMPTZ (NOT NULL)
+
+TABLE device_status
+- device_id TEXT (PRIMARY KEY, NOT NULL)
+- source_type TEXT
+- state TEXT
+- detail JSONB
+- last_seen TIMESTAMPTZ (NOT NULL)
+- updated_at TIMESTAMPTZ (NOT NULL)
+
+หมายเหตุ: device_status มีใน DB จริงและถูกใช้โดย scripts/mqtt_status.py
+แต่ไม่พบ CREATE TABLE ใน db/schema_core.sql ที่อ่าน
+
+VIEW device_status_live
+- device_id TEXT
+- source_type TEXT
+- state TEXT
+- last_seen TIMESTAMPTZ
+- age_sec NUMERIC
+
+ความหมายของ VIEW ที่ตรวจได้: ถ้า last_seen ห่างจาก now() ไม่เกิน 6 วินาที
+จะแสดง state เดิม มิฉะนั้นจะแสดง offline และคำนวณ age_sec
+
+ข้อมูล lookup จริง:
+- fruit_types: apple, orange
+- defect_types: bruise, crack, rot
+- models: mock และ quick-v0.1
+- models ทั้งสองแถวในเวลาตรวจยังไม่มี precision, recall, map, threshold
+
+4. สถานะข้อมูลของแต่ละหน้า Dashboard
+
+Simulate
+- เป็น mock/local state เป็นหลัก
+- ใช้ mockFruitEvents วนสร้าง event เมื่อกด Start; Start/Stop/Reset,
+  speed, threshold, camera, notification, detection mode และ mismatch
+  ไม่ได้เขียนลง DB
+- มีการเรียก /api/dashboard และนำ summary/events จาก DB มาใส่ค่าเริ่มต้น
+  บางส่วนเมื่อ API สำเร็จ แต่ event ที่วิ่งต่อใน simulation ยังมาจาก mock
+- profiles เก็บใน localStorage ไม่ใช่ settings table
+
+Dashboard Log
+- ใช้ข้อมูลจริงจาก PostgreSQL เมื่อ /api/dashboard สำเร็จ
+  (event จาก fruit_events และ summary จาก query)
+- ปัจจุบัน API query เฉพาะ orange และไม่เกิน 500 event
+- ถ้า API ใช้ไม่ได้ จะ fallback เป็น mockFruitEvents
+- filter, pagination และ CSV ทำใน browser
+- peak hour, chart เส้นแนวโน้ม และข้อความ/ตัวเลข fallback บางส่วนเป็น
+  hardcode หรือยังเป็น unknown ไม่ใช่ aggregation จาก DB
+
+Alert & Reports
+- รายการ alert เริ่มจาก mockAlerts และเก็บการ acknowledge ใน localStorage
+- ไม่ได้อ่าน alert จาก system_logs ผ่าน dashboardData โดยตรง
+- alert ใหม่จาก mismatch ใน simulation ก็อยู่ใน local state/localStorage
+- notification delivery, อัตราส่งสำเร็จ, daily/weekly report และตัวเลข
+  ในส่วน Reports เป็น hardcode/mock
+- ปุ่ม Alert rules แสดงข้อความจำลอง ไม่มี rule engine หรือการส่ง LINE/
+  Telegram จริง
+
+Report + AI
+- เป็น mock/hardcode ทั้งหมด: ตัวเลขรายงาน, executive summary, defect mix
+  และคำตอบจาก aiAnswers ใน src/data/mockData.ts
+- ยังไม่มีการเรียก AI service หรือ query ข้อมูล DB สำหรับวิเคราะห์
+
+System Status
+- เป็น mock/local state เป็นหลัก: online/offline, pending queue, sync progress
+  และ device registry ใช้ mockDevices
+- ปุ่ม Simulate offline/online และ Sync now เปลี่ยน state ในหน้าเท่านั้น
+  ไม่ได้ทำ offline queue หรือ sync กับ DB/cloud
+- DB มี device_status และ device_status_live จริง แต่หน้า System Status
+  ยังไม่ query ข้อมูลสองส่วนนี้
+
+Fruit Profiles
+- เป็น local state เริ่มจาก fruitProfiles.ts และบันทึกลง localStorage
+- แก้ค่า profile ได้เฉพาะใน browser; ไม่ได้อ่านหรือเขียน settings หรือ
+  fruit_types ใน DB
+- มี profile กล้วยทั้งที่ fruit_types ใน DB จริงมีเพียง apple/orange
+
+Users
+- เป็น mockUsers และ local state; เพิ่ม user, เปลี่ยน role, enable/disable
+  และ export CSV ทำเฉพาะ browser
+- ยังไม่มี users table, authentication หรือ API ผู้ใช้ใน DB
+- ระบุใน UI เองว่า mock auth
+
+My Team
+- เป็นข้อมูล hardcode ใน page.tsx และรูป static ใน public/images
+- ไม่ได้อ่านจาก DB และไม่มีการแก้ไขข้อมูล
+
+Login
+- เป็น demo form ใน browser; ตรวจเพียงว่ามี email/password
+- ไม่มี authentication backend, session หรือ users table
+
+5. ส่วนที่ไม่จำเป็นและควรตัดออก (หลังยืนยันว่าจะไม่ใช้)
+
+- src/db/pool.ts: ซ้ำกับ db/pool.ts และไม่พบการ import ใน source ปัจจุบัน
+  ควรเหลือ connection pool จุดเดียวเพื่อไม่ให้สับสน
+- src/hooks/useSimulation.ts: ไม่พบการใช้งาน; ถ้าไม่วางแผน refactor
+  simulation ให้ใช้ hook นี้ ควรตัดออก
+- app.config.ts: มีเพียง dummy logoUrl และไม่พบการ import; ควรตัดออก
+  หากไม่ได้ใช้โดยเครื่องมือภายนอก
+- app/api/ingest/route.ts และ scripts/mock-send.ps1: ไม่ได้เป็น flow ที่
+  Dashboard ปัจจุบันเรียกใช้; เก็บไว้เฉพาะกรณีจะใช้ HTTP ingest ต่อ
+  มิฉะนั้นควรตัดหรือทำให้เป็น endpoint ที่มีผู้เรียกชัดเจน
+- scripts/test_insert.py และ scripts/watch-db.ps1: เป็นเครื่องมือทดสอบ/
+  เฝ้าดู DB ไม่ใช่ runtime production; ไม่ควร bundle/deploy เป็นส่วนระบบจริง
+  แต่ควรเก็บไว้ถ้ายังใช้ทดสอบ DEV
+- logs/, next-dev.log, next-dev-error.log และ tsconfig.tsbuildinfo:
+  เป็น runtime log/cache ไม่ใช่ source; ควรล้างหรือไม่เก็บใน deliverable
+- mockData.ts, fruitProfiles.ts และ mockApi.ts: ควรตัดเฉพาะหลังจากทุกหน้า
+  เปลี่ยนไปใช้ DB/API จริงแล้ว เพราะปัจจุบันหลายหน้ายังพึ่งพาไฟล์เหล่านี้
+- เอกสารสถานะเก่าที่บอกว่ายังไม่มี schema หรือยังไม่เชื่อม DB ควรแก้ให้ตรง
+  สถานะจริง ไม่ควรลบทิ้งทันทีเพราะยังเป็นประวัติการทำงาน
+
+6. สิ่งที่ยังไม่ได้ทำ
+
+- ยังไม่มี adapter มาตรฐานสำหรับแปลง output ของแต่ละโมเดลจริงเป็น event
+  contract กลาง; ข้อมูลปัจจุบันที่ DB ตรวจพบเป็น quick/mock
+- ยังไม่ได้เชื่อมโมเดล CIRA CORE จริง, DeepClassif/DeepDetect หรือ
+  Quick Model ที่ผ่านการทดสอบภาพหน้างาน
+- schema source กับ DB จริงยังไม่ตรงกัน: device_status, view
+  device_status_live และ track_id ไม่มี migration/source ที่พบใน db/
+- ยังไม่มี migration/versioning ที่เป็นระบบสำหรับ schema production
+- หน้า Simulate ยังไม่ persist run_sessions, events, settings และยังไม่
+  sync ผล simulation เข้า fruit_events
+- หน้า Dashboard Log ยัง query ได้เฉพาะ orange และไม่มี date filter จริง
+  ใน SQL; filter หลักทำหลังโหลดข้อมูลใน browser
+- Alert engine, alert acknowledgement persistence, LINE/Telegram delivery
+  และ notification retry ยังไม่ได้ทำจริง
+- Report aggregation รายวัน/รายสัปดาห์และ AI Agent ที่อ่าน DB ยังไม่ได้ทำ
+- System Status ยังไม่อ่าน device_status_live และยังไม่มี offline queue/
+  online sync จริง; localStorage เป็นเพียงการจำลองสถานะ
+- Login, user management, roles/permissions และ session security ยังไม่ได้ทำ
+- ยังไม่มี production Supabase/Vercel configuration และการสลับ DEV/PROD
+- ยังไม่มีการยืนยัน schema/JSON contract กับ output จริงของทีม Real-time
+- ยังไม่มี automated test suite สำหรับ ingest, duplicate event, bad JSON,
+  DB failure, MQTT reconnect, offline sync และ false positive/negative
+- mosquitto DEV ใช้ allow_anonymous true; ยังไม่มีการทำ authentication/
+  authorization สำหรับใช้งานจริง
+- ข้อมูล model metrics (precision, recall, mAP, threshold) ใน DB ยังว่าง
+- ไม่แน่ใจว่าไฟล์ .npj ทุกไฟล์ใน root ถูกใช้งานใน flow ปัจจุบันอย่างไร
+  เพราะรายละเอียดภายในไฟล์ project ของ CiRA CORE ไม่ได้ยืนยันจาก source
+  TypeScript/Python/SQL
+
+==================================================
+7. ส่วน CIRA CORE (ฝั่ง flow) ที่ทำเสร็จแล้ว  [เพิ่มใหม่]
+==================================================
+
+Flow ที่ใช้งานจริง:
+  Auto Run -> VideoFile -> DeepDetect -> Python -> Mqtt Pub (events)
+                  |
+                  +--> Python (Heartbeat) -> Mqtt Pub (status)
+
+Heartbeat (Python node)
+- ส่งไป topic cira/fruit/status/CAM_01 ทุก 2 วินาที (INTERVAL = 2)
+- payload: device_id, source_type, state, detail, timestamp
+- state มาจาก VideoFile: started / playing (ตอนหยุดจะไม่ส่งอะไรเลย)
+- ใช้ state file ใน temp ของ Windows กัน publish ถี่เกินกำหนด
+
+พฤติกรรมของ CIRA CORE ที่รู้แล้ว (ทดสอบจริง)
+- เริ่มเล่น: ต้องกด Auto Run (ทำงานเหมือนกดค้าง/วนต่อเนื่อง)
+- หยุด: ต้องปิดสวิตช์บน node VideoFile เอง
+- node VideoFile ไม่มี input รับคำสั่งจากข้างนอก
+- Mqtt Sub รับข้อความได้ แต่สั่ง start/stop VideoFile ไม่ได้
+  (MQTT = ส่งครั้งเดียวแบบคลิก ไม่ใช่วนต่อเนื่องแบบ Auto Run)
+- ตอนปิดสวิตช์ CIRA จะไม่ส่งสัญญาณ stopped ออกมา
+
+==================================================
+8. การตรวจสถานะกล้อง (online/offline)  [เพิ่มใหม่]
+==================================================
+
+หลักการ: "เงียบ = ดับ" (heartbeat timeout) เพราะสั่ง/แจ้งจาก CIRA ตอนหยุดไม่ได้
+
+- device_status (ตารางดิบ): เก็บ state ล่าสุดที่ CIRA ส่งมา
+  *** ห้ามให้ Dashboard อ่านตารางนี้ตรง ๆ *** เพราะ state จะค้างเป็น
+  "playing" ทั้งที่กล้องหยุดแล้ว
+- device_status_live (VIEW): ให้ Dashboard อ่านตัวนี้เสมอ
+  ถ้า now()-last_seen < 6 วินาที -> แสดง state เดิม, ไม่งั้น -> 'offline'
+  มีคอลัมน์ age_sec
+
+ผลทดสอบจริง (2026-11-04):
+- หยุดแล้วขึ้น offline ที่ age ~6 วินาที
+- เริ่มใหม่แล้วกลับ playing ภายใน ~1-2 วินาที
+- state "started" โผล่ ~2 วินาทีตอนเริ่มเล่น (เป็นค่าจริงจาก VideoFile ไม่ใช่บั๊ก)
+- ข้อจำกัด: ไม่มีประวัติเปิด/ปิด มีแต่สถานะล่าสุด
+- ความเสี่ยง: ถ้า CIRA หน่วง heartbeat อาจกระพริบ offline ชั่วคราว
+  (ถ้าเจอบ่อย ขยาย timeout ใน VIEW เป็น 8 วินาที)
+
+คำสั่งสร้าง VIEW (ต้องใส่ใน migration_002):
+  CREATE OR REPLACE VIEW device_status_live AS
+  SELECT device_id, source_type,
+         CASE WHEN now()-last_seen < interval '6 seconds'
+              THEN state ELSE 'offline' END AS state,
+         last_seen,
+         round(extract(epoch FROM now()-last_seen)) AS age_sec
+  FROM device_status;
+
+คำสั่งเช็คสถานะจากเครื่อง (docker: cira-db, user=cira, db=cira_core):
+  docker exec cira-db psql -U cira -d cira_core -c "SELECT * FROM device_status_live;"
+
+==================================================
+9. ตัดสินใจแล้ว / ยกเลิก  [เพิ่มใหม่]
+==================================================
+
+- สั่งเปิด/ปิดกล้องจากข้างนอกผ่าน MQTT: ยกเลิก (CIRA ทำเป็น console
+  ควบคุมจาก Auto Run + สวิตช์ ระยะไกลยาก)
+- node ทดสอบที่ลบแล้ว: Mqtt Sub (+Auto Run), Python A (รับคำสั่ง),
+  Python B (Gate), Debug ที่เกี่ยวข้อง
+- ดูวิดีโอบนเว็บ: เลื่อนไปทีหลัง (แผน: ffmpeg + MediaMTX, อ่านวิดีโอแยก
+  ไม่ผ่าน CIRA; ภาพที่มี bounding box ต้องหา node ของ CIRA ที่ส่งภาพออกได้)
+- ประวัติเปิด/ปิดกล้อง: ยังไม่ทำ (ถ้าจะทำ ต้องมีตารางแยก + loop ดู VIEW
+  แล้วบันทึกตอน state เปลี่ยน)
+
+==================================================
+10. ความเสี่ยงที่ต้องแก้ก่อนใช้งานจริง  [เพิ่มใหม่]
+==================================================
+
+- schema หลุดจาก source: device_status, VIEW device_status_live, คอลัมน์
+  track_id มีใน DB จริงแต่ไม่อยู่ใน db/*.sql
+  -> ต้องเขียน db/migration_002.sql ไม่งั้นสร้าง DB ใหม่แล้วของหาย
+- Mosquitto allow_anonymous = true (DEV เท่านั้น)
+- Dashboard Log ยัง query เฉพาะ orange และ limit 500
+
+==================================================
+11. แผนงานถัดไป (เรียงตามลำดับ)  [เพิ่มใหม่]
+==================================================
+
+ 1. เขียน db/migration_002.sql (device_status + VIEW + track_id)
+ 2. หน้า System Status อ่าน device_status_live ผ่าน API ใหม่
+    (app/api/devices/route.ts, poll ทุก 2 วินาที)
+ 3. ตัดของไม่จำเป็น (ดูข้อ 5 + Users/Login/My Team ถ้าไม่ใช้)
+ 4. Dashboard Log: ทำ aggregation จริง (peak hour, กราฟ, date filter ใน SQL)
+ 5. หน้า Simulate: ตัดหรือเปลี่ยนเป็น "Live" ที่ดึงจาก DB
+ 6. ออกแบบวิธีทดสอบแบบ sim (ยิง event จำลองเข้า MQTT แล้วดูว่าเข้า DB/หน้าเว็บ)
+ 7. Alert / Report+AI (ทำทีหลังสุด)
+ 8. (ภายหลัง) ดูวิดีโอบนเว็บ, ประวัติเปิด/ปิดกล้อง

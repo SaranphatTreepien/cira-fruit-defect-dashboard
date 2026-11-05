@@ -1,0 +1,14 @@
+node_modules
+.next
+out
+*.tsbuildinfo
+.env
+.env.*
+.DS_Store
+
+# runtime logs
+logs/
+*.log
+
+# CIRA flow with a real DB connection string (password) inside -- keep out of git
+testSentMQTTandPosgrestoDOCKER.npj
