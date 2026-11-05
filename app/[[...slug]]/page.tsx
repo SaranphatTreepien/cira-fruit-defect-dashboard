@@ -627,6 +627,7 @@ type AlertRules = {
   mqtt: { enabled: boolean };
   internet: { enabled: boolean };
   writer: { enabled: boolean };
+  telegram: { enabled: boolean; min_level: 'info' | 'warning' | 'critical' };
 };
 const defaultAlertRules: AlertRules = {
   defect_rate: { enabled: true, threshold_pct: 70, window_min: 10, min_events: 30 },
@@ -636,6 +637,7 @@ const defaultAlertRules: AlertRules = {
   mqtt: { enabled: true },
   internet: { enabled: true },
   writer: { enabled: true },
+  telegram: { enabled: true, min_level: 'info' },
 };
 type DailyRow = { day: string; total: number; good: number; defect: number; defect_rate: number | null; avg_conf: number | null; last_at: string | null; run_min: number; alerts: number };
 
@@ -685,7 +687,7 @@ function AlertsView() {
     notify(response.ok ? `${message} ${payload.updated ?? 0} รายการ` : payload.error || 'บันทึกไม่สำเร็จ');
     void loadAlerts();
   };
-  const setRule = <G extends keyof AlertRules>(group: G, field: keyof AlertRules[G], value: number | boolean) => {
+  const setRule = <G extends keyof AlertRules>(group: G, field: keyof AlertRules[G], value: number | boolean | string) => {
     setRules((current) => current ? { ...current, [group]: { ...current[group], [field]: value } } : current); setRulesDirty(true); setRulesMsg('');
   };
   const saveRules = async () => {
@@ -715,7 +717,7 @@ function AlertsView() {
       <div className="summary-tile"><span>เปิดอยู่ (ยังไม่หาย)</span><strong style={{ color: c?.open ? '#d3574e' : undefined }}>{c?.open ?? '-'}</strong>{!!c?.open_critical && <span style={{ color: '#d3574e' }}>วิกฤต {c.open_critical}</span>}</div>
       <div className="summary-tile"><span>ยังไม่รับทราบ</span><strong>{c?.unacked ?? '-'}</strong></div>
       <div className="summary-tile"><span>alert วันนี้</span><strong>{c?.today ?? '-'}</strong></div>
-      <div className="summary-tile"><span>Watcher</span><strong style={{ fontSize: 15 }}><StatusPill tone={data?.watcher.running ? 'good' : 'bad'}>{data?.watcher.running ? 'ทำงาน' : 'หยุด'}</StatusPill></strong><span>Telegram: ยังไม่เปิดใช้ · รอส่ง {c?.notify_pending ?? 0}</span></div>
+      <div className="summary-tile"><span>Watcher</span><strong style={{ fontSize: 15 }}><StatusPill tone={data?.watcher.running ? 'good' : 'bad'}>{data?.watcher.running ? 'ทำงาน' : 'หยุด'}</StatusPill></strong><span>Telegram รอส่ง {c?.notify_pending ?? 0}</span></div>
     </div>
 
     <div className="section-grid grid-2 alerts-grid" style={{ alignItems: 'start' }}>
@@ -730,7 +732,7 @@ function AlertsView() {
           <div className="alert-content"><strong>{a.title}</strong><p>{a.detail}</p><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             <StatusPill tone={a.level === 'critical' ? 'bad' : a.level === 'warning' ? 'warn' : 'neutral'}>{alertLevelLabel[a.level]}</StatusPill>
             {a.level !== 'info' && <StatusPill tone={a.resolved_at ? 'good' : 'bad'}>{a.resolved_at ? 'หายแล้ว' : 'ยังเปิดอยู่'}</StatusPill>}
-            <span className="alert-meta">{alertTime(a.ts)}{a.resolved_at && a.level !== 'info' ? ` · หาย ${alertTime(a.resolved_at)}` : ''}{a.acked_at ? ` · รับทราบโดย ${a.acked_by}` : ''}</span>
+            <span className="alert-meta">{alertTime(a.ts)}{a.resolved_at && a.level !== 'info' ? ` · หาย ${alertTime(a.resolved_at)}` : ''}{a.acked_at ? ` · รับทราบโดย ${a.acked_by}` : ''} · Telegram: {({ sent: 'ส่งแล้ว', pending: 'รอส่ง', skipped: 'ไม่ส่ง', failed: 'ส่งไม่สำเร็จ' } as Record<string, string>)[a.notify_status] ?? a.notify_status}</span>
           </div></div>
           <div className="alert-actions">{a.status === 'new' && a.level !== 'info' ? <button type="button" className="btn btn-ghost" onClick={() => void ack({ action: 'ack', ids: [a.id] }, 'รับทราบแล้ว')}><Check size={13} /> รับทราบ</button> : <span className="alert-meta">{a.level === 'info' ? '' : 'รับทราบแล้ว'}</span>}</div>
         </div>) : <div className="empty">{data ? 'ไม่มี alert ตามตัวกรองนี้' : 'กำลังโหลด...'}</div>}</div>
@@ -757,6 +759,7 @@ function AlertsView() {
             <div className="rule-row"><Toggle on={rules.mqtt.enabled} onChange={(v) => setRule('mqtt', 'enabled', v)} label="MQTT broker ล่ม / กลับมา" hint="watcher เชื่อม broker เองไม่ได้ (ระดับวิกฤต)" /></div>
             <div className="rule-row"><Toggle on={rules.internet.enabled} onChange={(v) => setRule('internet', 'enabled', v)} label="Internet ล่ม / กลับมา" hint="ตรวจทุก 5 วินาที (HEALTHCHECK_URL)" /></div>
             <div className="rule-row"><Toggle on={rules.writer.enabled} onChange={(v) => setRule('writer', 'enabled', v)} label="ตัวบันทึก DB ไม่ทำงาน" hint="มีข้อความ MQTT แต่ไม่ถูกเขียนลง DB (mqtt_to_db.py)" /></div>
+            <div className="rule-row"><Toggle on={rules.telegram.enabled} onChange={(v) => setRule('telegram', 'enabled', v)} label="ส่งเข้า Telegram" hint="TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID ใน .env" /><div className="rule-fields">ส่งตั้งแต่ระดับ <select className="select" style={{ width: 120 }} value={rules.telegram.min_level} onChange={(e) => setRule('telegram', 'min_level', e.target.value)}><option value="info">ข้อมูล (ทุกอย่าง)</option><option value="warning">เตือนขึ้นไป</option><option value="critical">วิกฤตเท่านั้น</option></select></div></div>
             <div className="card-kicker">ฐานข้อมูลล่ม บันทึกเสมอ: watcher เก็บไว้ในหน่วยความจำแล้วเขียนลง DB ตอนกลับมา</div>
             {rulesMsg && <div className="card-kicker" style={{ color: rulesMsg.startsWith('บันทึกแล้ว') ? '#1a7f47' : '#c4564d' }}>{rulesMsg}</div>}
           </div> : <div className="empty">{rulesMsg || 'กำลังโหลด...'}</div>}

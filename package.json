@@ -3,9 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -H 0.0.0.0 -p 3000",
+    "dev": "node scripts/dev-all.mjs dev",
+    "dev:web": "next dev -H 0.0.0.0 -p 3000",
     "build": "next build",
-    "start": "next start -H 0.0.0.0 -p 3000",
+    "start": "node scripts/dev-all.mjs start",
+    "start:web": "next start -H 0.0.0.0 -p 3000",
+    "watcher": "python scripts/alert_watcher.py",
+    "test:telegram": "python scripts/alert_watcher.py --test-telegram",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

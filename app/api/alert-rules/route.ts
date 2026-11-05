@@ -4,7 +4,7 @@ import { pool } from '@/db/pool';
 export const dynamic = 'force-dynamic';
 
 // Shape and limits of settings.alert_rules (read by scripts/alert_watcher.py every 10 s).
-const SCHEMA: Record<string, Record<string, [number, number] | 'bool'>> = {
+const SCHEMA: Record<string, Record<string, [number, number] | 'bool' | 'level'>> = {
   defect_rate: { enabled: 'bool', threshold_pct: [1, 100], window_min: [1, 240], min_events: [1, 10000] },
   no_events: { enabled: 'bool', after_sec: [10, 3600] },
   latency: { enabled: 'bool', avg_sec: [1, 600] },
@@ -12,6 +12,7 @@ const SCHEMA: Record<string, Record<string, [number, number] | 'bool'>> = {
   mqtt: { enabled: 'bool' },
   internet: { enabled: 'bool' },
   writer: { enabled: 'bool' },
+  telegram: { enabled: 'bool', min_level: 'level' },
 };
 
 export async function GET() {
@@ -29,12 +30,15 @@ export async function PUT(request: NextRequest) {
   const input = (body as { rules?: Record<string, Record<string, unknown>> })?.rules;
   if (!input || typeof input !== 'object') return NextResponse.json({ error: 'rules required' }, { status: 400 });
 
-  const clean: Record<string, Record<string, number | boolean>> = {};
+  const clean: Record<string, Record<string, number | boolean | string>> = {};
   for (const [group, fields] of Object.entries(SCHEMA)) {
     clean[group] = {};
     for (const [field, spec] of Object.entries(fields)) {
       const value = input[group]?.[field];
-      if (spec === 'bool') {
+      if (spec === 'level') {
+        if (value !== 'info' && value !== 'warning' && value !== 'critical') return NextResponse.json({ error: `${group}.${field} must be info / warning / critical` }, { status: 400 });
+        clean[group][field] = value;
+      } else if (spec === 'bool') {
         if (typeof value !== 'boolean') return NextResponse.json({ error: `${group}.${field} must be true/false` }, { status: 400 });
         clean[group][field] = value;
       } else {

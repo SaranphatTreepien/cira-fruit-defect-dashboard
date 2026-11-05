@@ -16,11 +16,15 @@ Problems open ONE alert per condition (dedup_key) and are resolved when they cle
 written as resolved 'info' alerts so the dashboard can pop them up too. While the DB is down,
 alerts are kept in memory and written once it is reachable again.
 
-Notifications (Telegram/LINE) are NOT sent here yet: new alerts get notify_status='pending'.
+Telegram: every new alert is written with notify_status='pending'; the sender in this script posts
+it to TELEGRAM_CHAT_ID and marks it 'sent' (or 'skipped' / 'failed'). While the Internet is down,
+messages wait and are sent when it comes back. settings.alert_rules.telegram controls it.
 
-Run:  python scripts/alert_watcher.py
-Config (.env.local / environment): DATABASE_URL (required), MQTT_HOST, MQTT_PORT, HEALTHCHECK_URL,
-        ALERT_TICK_SEC, ALERT_RULE_EVERY_SEC, ALERT_NET_EVERY_SEC, LOG_DIR
+Run:   python scripts/alert_watcher.py
+Test:  python scripts/alert_watcher.py --test-telegram   (sends one test message and exits)
+Config (.env.local, then .env, or environment): DATABASE_URL (required), TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID, MQTT_HOST, MQTT_PORT, HEALTHCHECK_URL, ALERT_TICK_SEC,
+        ALERT_RULE_EVERY_SEC, ALERT_NET_EVERY_SEC, LOG_DIR
 """
 
 import json
@@ -28,9 +32,11 @@ import logging
 import os
 import sys
 import threading
+from collections import deque
 import time
 import urllib.request
-from datetime import datetime, timezone
+import urllib.error
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 
 import paho.mqtt.client as mqtt
@@ -53,6 +59,7 @@ def load_env(path):
 
 
 load_env(os.path.join(ROOT, ".env.local"))
+load_env(os.path.join(ROOT, ".env"))  # Telegram keys live here; never logged
 
 DSN = os.environ["DATABASE_URL"]
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
@@ -66,6 +73,7 @@ NET_EVERY_SEC = float(os.environ.get("ALERT_NET_EVERY_SEC", "5"))
 LOG_DIR = os.environ.get("LOG_DIR", os.path.join(ROOT, "logs"))
 RUNNING_STATES = {"playing", "started"}
 HEARTBEAT_FRESH_SEC = 6     # same timeout as VIEW device_status_live
+WRITER_GRACE_SEC = 15      # MQTT event not in DB after this long -> writer problem
 WRITER_LAG_SEC = 12         # MQTT heartbeat fresh but DB row older than this -> writer problem
 
 DEFAULT_RULES = {
@@ -76,7 +84,17 @@ DEFAULT_RULES = {
     "mqtt": {"enabled": True},
     "internet": {"enabled": True},
     "writer": {"enabled": True},
+    "telegram": {"enabled": True, "min_level": "info"},
 }
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+NOTIFY_EVERY_SEC = 4
+NOTIFY_MAX_ATTEMPTS = 5
+BACKLOG_SKIP_MIN = 10       # on start, pending alerts older than this are not sent (avoid a flood)
+SINGLE_INSTANCE_LOCK = 727001  # pg advisory lock id for alert_watcher
+LEVEL_RANK = {"info": 0, "warning": 1, "critical": 2}
+# Rules whose recovery has no dedicated message: a resolved one gets a "back to normal" info alert.
+RECOVERY_NOTE_RULES = {"defect_rate_high", "no_events", "latency_high", "writer_down"}
 
 os.makedirs(LOG_DIR, exist_ok=True)
 log = logging.getLogger("alert_watcher")
@@ -150,9 +168,21 @@ class Outbox:
                 if cur.fetchone()[0]:
                     log.warning("ALERT %s %s | %s | %s", level.upper(), key, title, detail)
             elif kind == "resolve":
-                cur.execute("UPDATE alerts SET resolved_at = %s WHERE dedup_key = %s AND resolved_at IS NULL RETURNING id", (ts, item[2]))
-                if cur.fetchone():
+                cur.execute("UPDATE alerts SET resolved_at = %s WHERE dedup_key = %s AND resolved_at IS NULL RETURNING id, rule, title, device_id, ts",
+                            (ts, item[2]))
+                row = cur.fetchone()
+                if row:
                     log.info("RESOLVED %s", item[2])
+                    alert_id, rule, title, device_id, opened = row
+                    if rule in RECOVERY_NOTE_RULES:
+                        lasted = (ts - opened).total_seconds()
+                        cur.execute(
+                            """INSERT INTO alerts (ts, rule, level, device_id, title, detail, data, dedup_key, resolved_at)
+                               VALUES (%s, %s, 'info', %s, %s, %s, %s, %s, now())""",
+                            (ts, f"{rule}_ok", device_id, f"กลับสู่ปกติ: {title}", f"เกิดขึ้นนาน {fmt_duration(lasted)}",
+                             Json({"alert_id": alert_id, "lasted_sec": round(lasted)}), f"{rule}_ok:{alert_id}"),
+                        )
+                        log.info("INFO %s_ok | กลับสู่ปกติ: %s", rule, title)
             else:
                 _, _, rule, level, title, detail, key, device_id, data = item
                 cur.execute(
@@ -173,6 +203,7 @@ class MqttMonitor:
         self.connected = False
         self.last_status = {}   # device_id -> epoch of last heartbeat seen on MQTT
         self.last_event = 0.0   # epoch of last fruit event message seen on MQTT
+        self.event_times = deque(maxlen=500)  # receive times of recent fruit event messages
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"cira-alert-watcher-{os.getpid()}", clean_session=True)
         self.client.on_connect = self.on_connect
         self.client.on_disconnect = self.on_disconnect
@@ -209,6 +240,7 @@ class MqttMonitor:
             self.last_status[device] = now
         else:
             self.last_event = now
+            self.event_times.append(now)
 
 
 def internet_up():
@@ -218,6 +250,94 @@ def internet_up():
             return 200 <= response.status < 400
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------- Telegram
+LEVEL_ICON = {"critical": "🔴", "warning": "🟠", "info": "🟢"}
+LEVEL_TH = {"critical": "วิกฤต", "warning": "เตือน", "info": "ข้อมูล"}
+
+
+def html_escape(text):
+    return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def telegram_send(text):
+    """POST sendMessage. Returns (ok, retry_after_sec, error). The token is never logged."""
+    body = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}).encode()
+    request = urllib.request.Request(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data=body,
+                                     headers={"content-type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read() or b"{}")
+            return bool(payload.get("ok")), 0, "" if payload.get("ok") else str(payload.get("description", "not ok"))[:200]
+    except urllib.error.HTTPError as error:
+        try:
+            payload = json.loads(error.read() or b"{}")
+        except Exception:
+            payload = {}
+        retry = int((payload.get("parameters") or {}).get("retry_after", 0))
+        return False, retry, f"HTTP {error.code}: {str(payload.get('description', ''))[:180]}"
+    except Exception as error:
+        return False, 0, type(error).__name__ + ": " + str(error)[:160]
+
+
+def format_alert(ts, level, title, detail, device_id, resolved_at, rule):
+    local = ts.astimezone(timezone(timedelta(hours=7))).strftime("%d/%m %H:%M:%S")
+    lines = [f"{LEVEL_ICON.get(level, '⚪')} <b>{html_escape(title)}</b>"]
+    if detail:
+        lines.append(html_escape(detail))
+    meta = [f"ระดับ {LEVEL_TH.get(level, level)}", local]
+    if device_id:
+        meta.insert(0, html_escape(device_id))
+    if level != "info" and resolved_at is not None:
+        meta.append("✅ หายแล้วตอนส่ง")
+    lines.append(" · ".join(meta))
+    lines.append(f"<i>CIRA CORE · {html_escape(rule)}</i>")
+    return "\n".join(lines)
+
+
+class TelegramNotifier:
+    def __init__(self):
+        self.configured = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+        self.pause_until = 0.0
+        self.last_run = 0.0
+        self.backlog_done = False
+
+    def process(self, cur, rules, internet_ok):
+        conf = rules.get("telegram", {})
+        if not self.configured or not conf.get("enabled", True):
+            cur.execute("UPDATE alerts SET notify_status = 'skipped', notify_error = %s WHERE notify_status = 'pending'",
+                        ("telegram disabled" if self.configured else "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set",))
+            return
+        if not self.backlog_done:
+            cur.execute("""UPDATE alerts SET notify_status = 'skipped', notify_error = 'old backlog at watcher start'
+                           WHERE notify_status = 'pending' AND ts < now() - (%s * interval '1 minute')""", (BACKLOG_SKIP_MIN,))
+            if cur.rowcount:
+                log.info("TELEGRAM skipped %s old pending alerts", cur.rowcount)
+            self.backlog_done = True
+        now = time.time()
+        if internet_ok is False or now < self.pause_until or now - self.last_run < NOTIFY_EVERY_SEC:
+            return
+        self.last_run = now
+        min_rank = LEVEL_RANK.get(conf.get("min_level", "info"), 0)
+        cur.execute("""SELECT id, ts, level, title, detail, device_id, resolved_at, rule, notify_attempts
+                       FROM alerts WHERE notify_status = 'pending' ORDER BY id LIMIT 10""")
+        for alert_id, ts, level, title, detail, device_id, resolved_at, rule, attempts in cur.fetchall():
+            if LEVEL_RANK.get(level, 0) < min_rank:
+                cur.execute("UPDATE alerts SET notify_status = 'skipped', notify_error = 'below min_level' WHERE id = %s", (alert_id,))
+                continue
+            ok, retry_after, error = telegram_send(format_alert(ts, level, title, detail, device_id, resolved_at, rule))
+            if ok:
+                cur.execute("UPDATE alerts SET notify_status = 'sent', notified_at = now(), notify_attempts = notify_attempts + 1, notify_error = NULL WHERE id = %s", (alert_id,))
+                log.info("TELEGRAM sent #%s %s", alert_id, title)
+                time.sleep(1.1)  # stay under Telegram's per-chat rate limit
+                continue
+            status = "failed" if attempts + 1 >= NOTIFY_MAX_ATTEMPTS else "pending"
+            cur.execute("UPDATE alerts SET notify_status = %s, notify_attempts = notify_attempts + 1, notify_error = %s WHERE id = %s",
+                        (status, error, alert_id))
+            log.warning("TELEGRAM failed #%s (attempt %s): %s", alert_id, attempts + 1, error)
+            self.pause_until = time.time() + max(retry_after, 5 * (attempts + 1))
+            break
 
 
 def load_rules(cur):
@@ -237,6 +357,7 @@ class Watcher:
         self.conn = None
         self.out = Outbox()
         self.mq = MqttMonitor()
+        self.tg = TelegramNotifier()
         self.rules = json.loads(json.dumps(DEFAULT_RULES))
         self.states = {}            # device_id -> (state, since_epoch)
         self.net = {"internet": None, "mqtt": None}   # last known True/False
@@ -244,6 +365,7 @@ class Watcher:
         self.db_down_since = None
         self.db_error = ""
         self.started_logged = False
+        self.states_loaded = False
         self.last_rules = 0.0
         self.last_rule_check = 0.0
         self.last_net_check = 0.0
@@ -325,11 +447,15 @@ class Watcher:
         for device, mqtt_seen in self.mq.last_status.items():
             if now - mqtt_seen < HEARTBEAT_FRESH_SEC and now - db_seen.get(device, 0) > WRITER_LAG_SEC:
                 problems.append(f"heartbeat ของ {device} มาทาง MQTT แต่ device_status ไม่อัปเดต")
-        if self.mq.last_event and now - self.mq.last_event < 60:
+        # An event received on MQTT more than WRITER_GRACE_SEC ago that is still newer than the last
+        # DB insert means the writer is not writing (the batch flush normally takes ~1-3 s).
+        waiting = [t for t in list(self.mq.event_times) if WRITER_GRACE_SEC < now - t < 120]
+        if waiting:
             cur.execute("SELECT extract(epoch FROM max(created_at)) FROM fruit_events")
             last_insert = float(cur.fetchone()[0] or 0)
-            if self.mq.last_event - last_insert > 20:
-                problems.append(f"มี event ทาง MQTT แต่ไม่ได้เขียนลง fruit_events มา {int(now - last_insert)} วินาที")
+            stuck = [t for t in waiting if t > last_insert + 2]
+            if stuck:
+                problems.append(f"มี event ทาง MQTT {len(stuck)} รายการที่ยังไม่ถูกเขียนลง fruit_events เกิน {WRITER_GRACE_SEC} วินาที")
         if problems:
             self.out.open("writer_down", "critical", "ตัวบันทึกข้อมูลลง DB ไม่ทำงาน",
                           " · ".join(problems) + " · ตรวจ scripts/mqtt_to_db.py", "writer_down")
@@ -389,8 +515,32 @@ class Watcher:
         log.info("DB back after %s", fmt_duration(down_for))
         self.db_down_since = None
 
+    def wait_for_single_instance(self):
+        """Hold a PostgreSQL advisory lock so only one watcher works at a time (manual run + npm run dev)."""
+        told = False
+        while True:
+            try:
+                conn = psycopg2.connect(DSN, connect_timeout=3)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_try_advisory_lock(%s)", (SINGLE_INSTANCE_LOCK,))
+                    if cur.fetchone()[0]:
+                        self.conn = conn
+                        return
+                conn.close()
+                if not told:
+                    log.info("มี alert_watcher อีกตัวทำงานอยู่แล้ว · ตัวนี้รอสำรอง (ตรวจทุก 10 วินาที)")
+                    told = True
+            except psycopg2.Error as error:
+                if not told:
+                    log.error("DB not reachable at start: %s (retrying)", str(error).strip().splitlines()[0] if str(error).strip() else error)
+                    told = True
+            time.sleep(10)
+
     def run(self):
-        log.info("START alert_watcher tick=%ss rules=%ss net=%ss", TICK_SEC, RULE_EVERY_SEC, NET_EVERY_SEC)
+        self.wait_for_single_instance()
+        log.info("START alert_watcher tick=%ss rules=%ss net=%ss telegram=%s", TICK_SEC, RULE_EVERY_SEC, NET_EVERY_SEC,
+                 "on" if self.tg.configured else "not configured")
         self.mq.start()
         backoff = 1
         try:
@@ -399,11 +549,20 @@ class Watcher:
                     self.check_network()
                     self.last_net_check = time.time()
                 try:
-                    if self.conn is None or self.conn.closed:
-                        self.conn = psycopg2.connect(DSN, connect_timeout=3)
-                        self.conn.autocommit = True
+                    if self.conn is None or self.conn.closed or not self.states_loaded:
+                        if self.conn is None or self.conn.closed:
+                            self.conn = psycopg2.connect(DSN, connect_timeout=3)
+                            self.conn.autocommit = True
+                            with self.conn.cursor() as cur:
+                                cur.execute("SELECT pg_try_advisory_lock(%s)", (SINGLE_INSTANCE_LOCK,))
+                                if not cur.fetchone()[0]:
+                                    log.warning("อีก watcher รับงานต่อระหว่าง DB หลุด · ตัวนี้หยุด")
+                                    self.out.items.clear()
+                                    self.lost_lock = True
+                                    return
                         with self.conn.cursor() as cur:
                             self.init_states(cur)
+                        self.states_loaded = True
                         log.info("DB connected")
                         self.on_db_back()
                         backoff = 1
@@ -424,6 +583,7 @@ class Watcher:
                             self.check_rules(cur)
                             self.last_rule_check = time.time()
                         self.out.flush(cur)
+                        self.tg.process(cur, self.rules, self.net.get("internet"))
                 except psycopg2.Error as error:
                     if self.db_down_since is None:
                         self.db_down_since = time.time()
@@ -446,15 +606,25 @@ class Watcher:
 
     def shutdown(self):
         self.mq.stop()
+        if getattr(self, "lost_lock", False):
+            return
         try:
             self.out.info("watcher_stop", "หยุดระบบเฝ้าระวัง (alert_watcher)", "alert ใหม่จะไม่ถูกสร้างจนกว่าจะรันใหม่", f"watcher_stop:{int(time.time())}", level="warning")
             if self.conn and not self.conn.closed:
                 with self.conn.cursor() as cur:
                     self.out.flush(cur)
+                    self.tg.last_run = 0
+                    self.tg.process(cur, self.rules, self.net.get("internet"))
         except Exception as error:
             log.error("could not record stop: %s", error)
         log.info("STOP")
 
 
 if __name__ == "__main__":
+    if "--test-telegram" in sys.argv:
+        if not (TELEGRAM_TOKEN and TELEGRAM_CHAT_ID):
+            sys.exit("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set in .env / .env.local")
+        ok, _, error = telegram_send(format_alert(utcnow(), "info", "ทดสอบการแจ้งเตือน CIRA CORE", "ข้อความทดสอบจาก alert_watcher.py --test-telegram", None, None, "test"))
+        print("sent" if ok else f"failed: {error}")
+        sys.exit(0 if ok else 1)
     Watcher().run()
