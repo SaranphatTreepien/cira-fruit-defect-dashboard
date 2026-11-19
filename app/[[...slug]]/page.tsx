@@ -9,12 +9,11 @@ import {
   Sparkles, Square, Tag, Timer, Trash2, TrendingDown, TrendingUp, UserCircle2, Users, Wifi, WifiOff,
   Zap, CircleDot, Monitor, X, Volume2, VolumeX, PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react';
-import {
-  defectOptions, fruitOptions, mockAlerts, mockDevices, mockFruitEvents,
-  mockUsers, type AlertItem, type FruitEvent, type FruitProfile, type FruitType,
-} from '@/data/mockData';
-import { fruitProfiles } from '@/data/fruitProfiles';
-import { toCsv } from '@/lib/mockApi';
+type AuthUser = { id: number; email: string; name: string; role: 'admin' | 'viewer' };
+const AuthContext = createContext<{ user: AuthUser | null; logout: () => void }>({ user: null, logout: () => undefined });
+const useAuth = () => useContext(AuthContext);
+const initialsOf = (name: string) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? '').join('') || '?';
+const roleLabel = (role: AuthUser['role']) => role === 'admin' ? 'Admin' : 'Viewer';
 
 type ShellStatus = { state: string | null; deviceId: string | null; epm: number | null; model: string | null; mqtt: string; db: string; internet: string };
 const emptyShellStatus: ShellStatus = { state: null, deviceId: null, epm: null, model: null, mqtt: 'unknown', db: 'unknown', internet: 'unknown' };
@@ -22,22 +21,26 @@ const emptyShellStatus: ShellStatus = { state: null, deviceId: null, epm: null, 
 const ShellContext = createContext<{ status: ShellStatus; report: (patch: Partial<ShellStatus>) => void }>({ status: emptyShellStatus, report: () => undefined });
 
 // Polls real machine + health status once for the whole shell (Topbar / Sidebar).
-function useShellStatus(skipLive: boolean) {
+// Live and System Status poll the same data faster themselves and report() it, so the shell skips them.
+function useShellStatus(skipLive: boolean, skipHealth: boolean) {
   const [status, setStatus] = useState<ShellStatus>(emptyShellStatus);
   const skipRef = useRef(skipLive);
   skipRef.current = skipLive;
+  const skipHealthRef = useRef(skipHealth);
+  skipHealthRef.current = skipHealth;
   useEffect(() => {
     let active = true;
     const loadLive = async () => {
       if (skipRef.current) return;
       try {
-        const response = await fetch('/api/live?window=5', { cache: 'no-store' });
+        const response = await fetch('/api/live?lite=1', { cache: 'no-store' });
         if (!response.ok) throw new Error();
         const payload = await response.json() as { device: { device_id: string; state: string | null } | null; events_last_minute: number; recent: { model_version: string | null }[] };
         if (active) setStatus((current) => ({ ...current, state: payload.device?.state ?? 'offline', deviceId: payload.device?.device_id ?? null, epm: payload.events_last_minute, model: payload.recent[0]?.model_version ?? null }));
       } catch { if (active) setStatus((current) => ({ ...current, state: null, epm: null })); }
     };
     const loadHealth = async () => {
+      if (skipHealthRef.current) return;
       try {
         const response = await fetch('/api/system-health', { cache: 'no-store' });
         const payload = await response.json() as { mqtt: string; db: string; internet: string };
@@ -54,26 +57,27 @@ function useShellStatus(skipLive: boolean) {
 }
 const shellPlaying = (state: string | null) => state === 'playing' || state === 'started';
 
-type PageKey = 'simulate' | 'logs' | 'alerts' | 'reports' | 'system' | 'profiles' | 'users' | 'myteam' | 'login';
+type PageKey = 'simulate' | 'logs' | 'runs' | 'alerts' | 'system' | 'profiles' | 'users' | 'myteam' | 'login';
 
-const navItems: { href: string; key: PageKey; label: string; sub: string; icon: typeof Activity }[] = [
+const navItems: { href: string; key: PageKey; label: string; sub: string; icon: typeof Activity; adminOnly?: boolean }[] = [
   { href: '/simulate', key: 'simulate', label: 'Live', sub: 'Real-time', icon: Activity },
   { href: '/logs', key: 'logs', label: 'Dashboard Log', sub: 'Traceability', icon: History },
+  { href: '/runs', key: 'runs', label: 'Runs & Models', sub: 'Shifts', icon: Timer },
   { href: '/alerts', key: 'alerts', label: 'Alert & Reports', sub: 'Operations', icon: Bell },
   { href: '/system', key: 'system', label: 'System Status', sub: 'Device health', icon: Wifi },
-  { href: '/profiles', key: 'profiles', label: 'Fruit Profiles', sub: 'Configurations', icon: Tag },
-  { href: '/users', key: 'users', label: 'Users', sub: 'Access control', icon: Users },
+  { href: '/profiles', key: 'profiles', label: 'Fruit Profiles', sub: 'Reference', icon: Tag },
+  { href: '/users', key: 'users', label: 'Users', sub: 'Access control', icon: Users, adminOnly: true },
   { href: '/myteam', key: 'myteam', label: 'My Team', sub: 'Project members', icon: UserCircle2 },
 ];
 
 const pageMeta: Record<PageKey, { eyebrow: string; title: string; subtitle: string }> = {
   simulate: { eyebrow: '01 • LIVE', title: 'Live', subtitle: 'สถานะเครื่องและผลคัดแยกแบบ real-time จากฐานข้อมูล' },
   logs: { eyebrow: '02 • TRACEABILITY', title: 'Dashboard Log', subtitle: 'ย้อนดูเหตุการณ์ทุกผลผลิตตั้งแต่ Camera, NIR จนถึงจุดคัดแยก' },
-  alerts: { eyebrow: '03 • OPERATIONS', title: 'Alert, รายงาน + AI', subtitle: 'ติดตามเหตุการณ์ รายงานรายวัน และให้ AI สรุป (เมนูเดียวกับ Telegram bot)' },
-  reports: { eyebrow: '04 • INTELLIGENCE', title: 'Report + AI Agent', subtitle: 'สรุปภาพรวมจากข้อมูลการคัดแยก และถาม AI Agent เพื่อช่วยตัดสินใจ' },
-  system: { eyebrow: '05 • CONNECTIVITY', title: 'System Status', subtitle: 'มองเห็นสุขภาพของอุปกรณ์ edge และสถานะข้อมูล Offline / Online' },
-  profiles: { eyebrow: '06 • CONFIGURATION', title: 'Fruit Profiles', subtitle: 'ตั้งค่า threshold, NIR parameters และความเร็วแยกตามชนิดผลไม้' },
-  users: { eyebrow: '07 • ACCESS', title: 'Users & Roles', subtitle: 'จัดการผู้ใช้งานและสิทธิ์การเข้าถึงพื้นที่ควบคุม' },
+  runs: { eyebrow: '03 • SHIFTS', title: 'Runs & Models', subtitle: 'รอบการทำงานตัดอัตโนมัติจากสถานะเครื่อง และเทียบผลของแต่ละโมเดล' },
+  alerts: { eyebrow: '04 • OPERATIONS', title: 'Alert, รายงาน + AI', subtitle: 'ติดตามเหตุการณ์ รายงานรายวัน และให้ AI สรุป (เมนูเดียวกับ Telegram bot)' },
+  system: { eyebrow: '05 • CONNECTIVITY', title: 'System Status', subtitle: 'สุขภาพของอุปกรณ์และระบบรับข้อมูล รวมถึงข้อมูลที่ถูกปฏิเสธ' },
+  profiles: { eyebrow: '06 • REFERENCE', title: 'Fruit Profiles', subtitle: 'ชนิดผลไม้ ตำหนิ และโมเดลที่ระบบรู้จัก (อ่านอย่างเดียว · ค่าตรวจจับตั้งใน CIRA CORE)' },
+  users: { eyebrow: '07 • ACCESS', title: 'Users & Roles', subtitle: 'จัดการบัญชีผู้ใช้และสิทธิ์ Admin / Viewer' },
   myteam: { eyebrow: '08 • PROJECT TEAM', title: 'My Team', subtitle: 'ทีมผู้อยู่เบื้องหลัง Fruit Defect Detection Engine by CIRA CORE' },
   login: { eyebrow: 'CIRA CORE • SECURE ACCESS', title: 'เข้าสู่ระบบ', subtitle: 'เข้าสู่ Control Room เพื่อดูสถานะไลน์คัดแยก' },
 };
@@ -98,14 +102,16 @@ function PageHeader({ page, actions }: { page: PageKey; actions?: React.ReactNod
 function Sidebar({ current, mobileOpen, onClose, status }: { current: PageKey; mobileOpen: boolean; onClose: () => void; status: ShellStatus }) {
   const lineTone = status.state == null ? 'neutral' : shellPlaying(status.state) ? 'good' : 'bad';
   const linkTone = status.mqtt === 'online' && status.db === 'online' ? 'good' : status.mqtt === 'unknown' && status.db === 'unknown' ? 'neutral' : 'bad';
-  return <aside className={`sidebar ${mobileOpen ? 'mobile-open' : ''}`}><div style={{ display: 'flex', alignItems: 'center' }}><Logo /><button className="mobile-close" aria-label="ปิดเมนู" onClick={onClose}><X size={17} /></button></div><div className="nav-label">Workspace</div><nav className="nav-list">{navItems.map(({ href, key, label, icon: Icon }) => <a key={key} href={href} onClick={onClose} aria-label={label} title={label} className={`nav-item ${current === key ? 'active' : ''}`}><Icon className="nav-icon" /><span>{label}</span></a>)}</nav><div className="sidebar-bottom"><div className="system-mini"><div className="system-mini-row"><span><i className={`dot ${lineTone}`} />{status.deviceId ?? 'Camera'}</span><strong>{status.state == null ? 'ไม่ทราบ' : shellPlaying(status.state) ? 'ทำงาน' : 'หยุด'}</strong></div><div className="system-mini-row"><span><i className={`dot ${linkTone}`} />MQTT / DB</span><strong>{status.mqtt === 'online' ? 'on' : status.mqtt === 'offline' ? 'off' : '?'} / {status.db === 'online' ? 'on' : status.db === 'offline' ? 'off' : '?'}</strong></div></div></div></aside>;
+  const { user } = useAuth();
+  return <aside className={`sidebar ${mobileOpen ? 'mobile-open' : ''}`}><div style={{ display: 'flex', alignItems: 'center' }}><Logo /><button className="mobile-close" aria-label="ปิดเมนู" onClick={onClose}><X size={17} /></button></div><div className="nav-label">Workspace</div><nav className="nav-list">{navItems.filter((item) => !item.adminOnly || user?.role === 'admin').map(({ href, key, label, icon: Icon }) => <a key={key} href={href} onClick={onClose} aria-label={label} title={label} className={`nav-item ${current === key ? 'active' : ''}`}><Icon className="nav-icon" /><span>{label}</span></a>)}</nav><div className="sidebar-bottom"><div className="system-mini"><div className="system-mini-row"><span><i className={`dot ${lineTone}`} />{status.deviceId ?? 'Camera'}</span><strong>{status.state == null ? 'ไม่ทราบ' : shellPlaying(status.state) ? 'ทำงาน' : 'หยุด'}</strong></div><div className="system-mini-row"><span><i className={`dot ${linkTone}`} />MQTT / DB</span><strong>{status.mqtt === 'online' ? 'on' : status.mqtt === 'offline' ? 'off' : '?'} / {status.db === 'online' ? 'on' : status.db === 'offline' ? 'off' : '?'}</strong></div></div></div></aside>;
 }
 
-function Topbar({ status, online, onOpenMenu, onToggleOnline, unacked, sound, onToggleSound, collapsed, onToggleSidebar }: { status: ShellStatus; online: boolean; onOpenMenu: () => void; onToggleOnline: () => void; unacked: number; sound: boolean; onToggleSound: () => void; collapsed: boolean; onToggleSidebar: () => void }) {
+function Topbar({ status, onOpenMenu, unacked, sound, onToggleSound, collapsed, onToggleSidebar }: { status: ShellStatus; onOpenMenu: () => void; unacked: number; sound: boolean; onToggleSound: () => void; collapsed: boolean; onToggleSidebar: () => void }) {
   const running = shellPlaying(status.state);
   const router = useRouter();
+  const { user, logout } = useAuth();
   const [profileOpen, setProfileOpen] = useState(false);
-  return <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="เปิดเมนู" onClick={onOpenMenu}><SlidersHorizontal size={16} /></button><button type="button" className="topbar-icon sidebar-toggle" onClick={onToggleSidebar} aria-pressed={collapsed} aria-label={collapsed ? 'ขยายแถบเมนู' : 'ย่อแถบเมนู'} title={collapsed ? 'ขยายแถบเมนู' : 'ย่อแถบเมนู'}>{collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button><span className={`status-chip ${running ? 'running' : ''}`}><i className={`dot ${running ? 'good' : 'neutral'}`} />{status.state == null ? 'ไม่ทราบสถานะเครื่อง' : running ? 'เครื่องกำลังทำงาน' : 'เครื่องหยุดอยู่'}</span><button type="button" className={`status-chip ${online ? '' : 'offline'}`} aria-pressed={online} onClick={onToggleOnline} title="จำลอง Online / Offline เฉพาะใน UI"><i className={`dot ${online ? 'good' : 'warn'}`} />{online ? 'Online' : 'Offline'}</button>{status.model && <span className="status-chip" title="model_version ของ event ล่าสุด">Model · {status.model}</span>}</div><div className="topbar-right"><div className="status-cluster"><Activity size={14} color="#1aa55c" /><span style={{ color: '#6e8579', fontSize: 11 }}>Throughput <strong style={{ color: '#10352a' }}>{status.epm == null ? '-' : `${status.epm} ผล/นาที`}</strong></span></div><div className="topbar-separator" /><button type="button" className="topbar-icon" onClick={onToggleSound} aria-pressed={sound} title={sound ? 'ปิดเสียง / desktop notification' : 'เปิดเสียง + desktop notification เมื่อมี alert'}>{sound ? <Volume2 size={16} /> : <VolumeX size={16} />}</button><a href="/alerts" className="topbar-icon bell" title={`${unacked} alert ยังไม่รับทราบ`} aria-label={`Alert ยังไม่รับทราบ ${unacked} รายการ`}><Bell size={16} />{unacked > 0 && <span className="bell-badge">{unacked > 99 ? '99+' : unacked}</span>}</a><div className="topbar-separator" /><div className="profile-menu"><button type="button" className="user-pill profile-trigger" aria-expanded={profileOpen} onClick={() => setProfileOpen((open) => !open)}><div className="avatar">NP</div><div className="user-copy"><strong>Narin P.</strong><span>Operator</span></div><ChevronRight className={profileOpen ? 'profile-chevron open' : 'profile-chevron'} size={15} /></button>{profileOpen && <div className="profile-dropdown"><div className="profile-dropdown-head"><strong>Narin P.</strong><span>operator@ciracore.ai</span></div><button type="button" onClick={() => router.push('/users')}><UserCircle2 size={15} />จัดการโปรไฟล์</button><button type="button" className="profile-logout" onClick={() => router.push('/login')}><LogOut size={15} />Logout</button></div>}</div></div></header>;
+  return <header className="topbar"><div className="topbar-left"><button className="mobile-menu" aria-label="เปิดเมนู" onClick={onOpenMenu}><SlidersHorizontal size={16} /></button><button type="button" className="topbar-icon sidebar-toggle" onClick={onToggleSidebar} aria-pressed={collapsed} aria-label={collapsed ? 'ขยายแถบเมนู' : 'ย่อแถบเมนู'} title={collapsed ? 'ขยายแถบเมนู' : 'ย่อแถบเมนู'}>{collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button><span className={`status-chip ${running ? 'running' : ''}`}><i className={`dot ${running ? 'good' : 'neutral'}`} />{status.state == null ? 'ไม่ทราบสถานะเครื่อง' : running ? 'เครื่องกำลังทำงาน' : 'เครื่องหยุดอยู่'}</span>{status.model && <span className="status-chip" title="model_version ของ event ล่าสุด">Model · {status.model}</span>}</div><div className="topbar-right"><div className="status-cluster"><Activity size={14} color="#1aa55c" /><span style={{ color: '#6e8579', fontSize: 11 }}>Throughput <strong style={{ color: '#10352a' }}>{status.epm == null ? '-' : `${status.epm} ผล/นาที`}</strong></span></div><div className="topbar-separator" /><button type="button" className="topbar-icon" onClick={onToggleSound} aria-pressed={sound} title={sound ? 'ปิดเสียง / desktop notification' : 'เปิดเสียง + desktop notification เมื่อมี alert'}>{sound ? <Volume2 size={16} /> : <VolumeX size={16} />}</button><a href="/alerts" className="topbar-icon bell" title={`${unacked} alert ยังไม่รับทราบ`} aria-label={`Alert ยังไม่รับทราบ ${unacked} รายการ`}><Bell size={16} />{unacked > 0 && <span className="bell-badge">{unacked > 99 ? '99+' : unacked}</span>}</a><div className="topbar-separator" /><div className="profile-menu"><button type="button" className="user-pill profile-trigger" aria-expanded={profileOpen} onClick={() => setProfileOpen((open) => !open)}><div className="avatar">{user ? initialsOf(user.name) : '?'}</div><div className="user-copy"><strong>{user?.name ?? '-'}</strong><span>{user ? roleLabel(user.role) : ''}</span></div><ChevronRight className={profileOpen ? 'profile-chevron open' : 'profile-chevron'} size={15} /></button>{profileOpen && <div className="profile-dropdown"><div className="profile-dropdown-head"><strong>{user?.name ?? '-'}</strong><span>{user?.email ?? ''} · {user ? roleLabel(user.role) : ''}</span></div>{user?.role === 'admin' && <button type="button" onClick={() => { setProfileOpen(false); router.push('/users'); }}><UserCircle2 size={15} />จัดการผู้ใช้</button>}<button type="button" className="profile-logout" onClick={() => { setProfileOpen(false); logout(); }}><LogOut size={15} />Logout</button></div>}</div></div></header>;
 }
 
 
@@ -189,14 +195,14 @@ function AlertToasts({ toasts, dismiss }: { toasts: FeedAlert[]; dismiss: (id: n
   </div>)}</div>;
 }
 
-function Shell({ current, children, online, setOnline, mobileOpen, setMobileOpen }: { current: PageKey; children: React.ReactNode; online: boolean; setOnline: (value: boolean) => void; mobileOpen: boolean; setMobileOpen: (value: boolean) => void }) {
+function Shell({ current, children, mobileOpen, setMobileOpen }: { current: PageKey; children: React.ReactNode; mobileOpen: boolean; setMobileOpen: (value: boolean) => void }) {
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { setCollapsed(window.localStorage.getItem('cira-core-sidebar') === 'collapsed'); }, []);
   const toggleSidebar = () => setCollapsed((value) => { window.localStorage.setItem('cira-core-sidebar', value ? 'open' : 'collapsed'); return !value; });
-  const shell = useShellStatus(current === 'simulate');
+  const shell = useShellStatus(current === 'simulate', current === 'system');
   const status = shell.status;
   const feed = useAlertFeed();
-  return <ShellContext.Provider value={shell}><div className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''}`}><Sidebar current={current} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} status={status} /><div className="main-shell"><Topbar status={status} online={online} onOpenMenu={() => setMobileOpen(true)} onToggleOnline={() => setOnline(!online)} unacked={feed.unacked} sound={feed.sound} onToggleSound={feed.toggleSound} collapsed={collapsed} onToggleSidebar={toggleSidebar} /><AlertToasts toasts={feed.toasts} dismiss={feed.dismiss} />{children}</div></div></ShellContext.Provider>;
+  return <ShellContext.Provider value={shell}><div className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''}`}><Sidebar current={current} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} status={status} /><div className="main-shell"><Topbar status={status} onOpenMenu={() => setMobileOpen(true)} unacked={feed.unacked} sound={feed.sound} onToggleSound={feed.toggleSound} collapsed={collapsed} onToggleSidebar={toggleSidebar} /><AlertToasts toasts={feed.toasts} dismiss={feed.dismiss} />{children}</div></div></ShellContext.Provider>;
 }
 
 function MetricCard({ label, value, foot, tone, icon }: { label: string; value: string | number; foot?: string; tone?: 'green' | 'orange'; icon?: React.ReactNode }) {
@@ -232,7 +238,7 @@ const liveConf = (value: number | null) => value == null ? '-' : `${(value <= 1 
 const liveEmoji = (fruit: string | null) => (fruit && fruitEmoji[fruit]) || '🍈';
 const liveKind = (event: LiveEvent): 'good' | 'defect' => event.external_result === 'defect' ? 'defect' : 'good';
 
-function SimulateView({ online, setOnline, setRunning }: { online: boolean; setOnline: (value: boolean) => void; setRunning: (value: boolean) => void }) {
+function SimulateView() {
   const [windowMin, setWindowMin] = useState(15);
   const [live, setLive] = useState<LiveData | null>(null);
   const shell = useContext(ShellContext);
@@ -267,7 +273,6 @@ function SimulateView({ online, setOnline, setRunning }: { online: boolean; setO
         if (!active) return;
         const nowState = payload.device?.state ?? 'offline';
         const nowPlaying = nowState === 'playing' || nowState === 'started';
-        setRunning(nowPlaying);
         shell.report({ state: nowState, deviceId: payload.device?.device_id ?? null, epm: payload.events_last_minute, model: payload.recent[0]?.model_version ?? null });
         if (seen.current && nowPlaying) {
           const fresh = payload.recent.filter((event) => !seen.current?.has(event.event_id) && Date.parse(event.ts ?? '') >= newestTs.current).reverse();
@@ -291,7 +296,7 @@ function SimulateView({ online, setOnline, setRunning }: { online: boolean; setO
     const id = window.setInterval(() => { if (!document.hidden) void load(); }, 2000);
     return () => { active = false; window.clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [windowMin, setRunning]);
+  }, [windowMin]);
 
   // Release queued events onto the belt one at a time.
   useEffect(() => {
@@ -328,7 +333,7 @@ function SimulateView({ online, setOnline, setRunning }: { online: boolean; setO
   const windowLabel = liveWindows.find((w) => w.v === windowMin)?.label ?? '';
   const tone = (value: string): 'good' | 'bad' | 'neutral' => value === 'online' ? 'good' : value === 'offline' ? 'bad' : 'neutral';
   const label = (value: string) => value === 'online' ? 'Online' : value === 'offline' ? 'Offline' : 'ไม่ทราบ';
-  const internetState = online ? health.internet : 'offline';
+  const internetState = health.internet;
   const activeIds = new Set(tokens.map((t) => t.id));
   const lastEventAgo = live?.last_event_at ? Math.max(0, Math.round((Date.parse(live.now) - Date.parse(live.last_event_at)) / 1000)) : null;
   const latest = live?.recent[0];
@@ -349,7 +354,6 @@ function SimulateView({ online, setOnline, setRunning }: { online: boolean; setO
         <span>MQTT</span><StatusPill tone={tone(health.mqtt)}>{label(health.mqtt)}</StatusPill>
         <span>DB</span><StatusPill tone={tone(health.db)}>{label(health.db)}</StatusPill>
         <span>Internet</span><StatusPill tone={tone(internetState)}>{label(internetState)}</StatusPill>
-        <button type="button" className="btn btn-ghost live-sim-btn" aria-pressed={!online} onClick={() => setOnline(!online)} title="จำลอง offline เฉพาะใน UI ไม่ได้ตัดเน็ตจริง">{online ? <WifiOff size={13} /> : <Wifi size={13} />}{online ? 'จำลอง Offline' : 'กลับ Online'}</button>
       </div>
       <select className="select live-window" aria-label="ช่วงเวลา" value={windowMin} onChange={(e) => setWindowMin(Number(e.target.value))}>{liveWindows.map((w) => <option key={w.v} value={w.v}>ช่วง {w.label}</option>)}</select>
     </div>
@@ -361,7 +365,6 @@ function SimulateView({ online, setOnline, setRunning }: { online: boolean; setO
       <span title="รวมทั้งหมด: timestamp ของ CIRA จนถึงหน้าเว็บ (ก่อน animation)">รวม CIRA → จอ <StatusPill tone={latencyTone(arrival?.e2e)}>{sec(arrival?.e2e)}</StatusPill></span>
       <em>{arrival ? `วัดจาก event ใหม่ล่าสุด · ${arrivalAge ?? 0} วิที่แล้ว` : 'รอ event ใหม่หลังเปิดหน้าเพื่อวัด DB → จอ'} · poll ทุก 2 วิ · animation +2.4 วิ</em>
     </div>
-    {!online && <div className="live-banner"><CloudOff size={14} />Internet ออฟไลน์ (จำลองใน UI) · ระบบทำงานต่อแบบ local และจะ sync เมื่อกลับมาออนไลน์</div>}
     {error && <div className="live-banner error">{error}</div>}
 
     <div className="live-metrics">
@@ -625,6 +628,8 @@ type AlertRules = {
   internet: { enabled: boolean };
   writer: { enabled: boolean };
   telegram: { enabled: boolean; min_level: 'info' | 'warning' | 'critical' };
+  model_change: { enabled: boolean };
+  daily_report: { enabled: boolean; hour: number; minute: number };
 };
 const defaultAlertRules: AlertRules = {
   defect_rate: { enabled: true, threshold_pct: 70, window_min: 10, min_events: 30 },
@@ -635,6 +640,8 @@ const defaultAlertRules: AlertRules = {
   internet: { enabled: true },
   writer: { enabled: true },
   telegram: { enabled: true, min_level: 'info' },
+  model_change: { enabled: true },
+  daily_report: { enabled: true, hour: 18, minute: 0 },
 };
 type DailyRow = { day: string; total: number; good: number; defect: number; defect_rate: number | null; avg_conf: number | null; last_at: string | null; run_min: number; alerts: number };
 
@@ -648,6 +655,7 @@ const csvDownload = (name: string, header: string[], rows: (string | number | nu
 };
 
 function AlertsView() {
+  const isAdmin = useAuth().user?.role === 'admin';
   const [range, setRange] = useState('7d'); const [status, setStatus] = useState('all'); const [level, setLevel] = useState('all');
   const [data, setData] = useState<AlertData | null>(null); const [error, setError] = useState('');
   const [rules, setRules] = useState<AlertRules | null>(null); const [rulesDirty, setRulesDirty] = useState(false); const [rulesMsg, setRulesMsg] = useState('');
@@ -758,8 +766,8 @@ function AlertsView() {
         </div>
 
         <div className="card pad">
-          <SectionHeader title="Alert rules" kicker="เก็บใน settings.alert_rules" action={<button type="button" className="btn btn-primary" onClick={() => void saveRules()} disabled={!rulesDirty}><Save size={14} /> บันทึก</button>} />
-          {rules ? <div className="rule-list">
+          <SectionHeader title="Alert rules" kicker={isAdmin ? 'เก็บใน settings.alert_rules' : 'ดูได้อย่างเดียว · แก้ได้เฉพาะ Admin'} action={isAdmin ? <button type="button" className="btn btn-primary" onClick={() => void saveRules()} disabled={!rulesDirty}><Save size={14} /> บันทึก</button> : undefined} />
+          {rules ? <div className={`rule-list ${isAdmin ? '' : 'readonly'}`}>
             <div className="rule-row"><Toggle on={rules.device.enabled} onChange={(v) => setRule('device', 'enabled', v)} label="กล้องหยุด / กลับมา" hint="ไม่มี heartbeat เกิน 6 วินาที (จาก VIEW)" /><label className="rule-check"><input type="checkbox" checked={rules.device.notify_online} onChange={(e) => setRule('device', 'notify_online', e.target.checked)} /> แจ้งตอนกลับมาด้วย</label></div>
             <div className="rule-row"><Toggle on={rules.defect_rate.enabled} onChange={(v) => setRule('defect_rate', 'enabled', v)} label="Defect rate สูง" hint="ต้องมี event ขั้นต่ำก่อนคำนวณ" /><div className="rule-fields">เกิน {num(rules.defect_rate.threshold_pct, (v) => setRule('defect_rate', 'threshold_pct', v), 1, 100, '%')} ใน {num(rules.defect_rate.window_min, (v) => setRule('defect_rate', 'window_min', v), 1, 240, 'นาที')} ขั้นต่ำ {num(rules.defect_rate.min_events, (v) => setRule('defect_rate', 'min_events', v), 1, 10000, 'ผล')}</div></div>
             <div className="rule-row"><Toggle on={rules.no_events.enabled} onChange={(v) => setRule('no_events', 'enabled', v)} label="ทำงานแต่ไม่มีผลไม้เข้า" hint="เครื่อง playing แต่ไม่มี event" /><div className="rule-fields">นานกว่า {num(rules.no_events.after_sec, (v) => setRule('no_events', 'after_sec', v), 10, 3600, 'วินาที')}</div></div>
@@ -768,6 +776,8 @@ function AlertsView() {
             <div className="rule-row"><Toggle on={rules.internet.enabled} onChange={(v) => setRule('internet', 'enabled', v)} label="Internet ล่ม / กลับมา" hint="ตรวจทุก 5 วินาที (HEALTHCHECK_URL)" /></div>
             <div className="rule-row"><Toggle on={rules.writer.enabled} onChange={(v) => setRule('writer', 'enabled', v)} label="ตัวบันทึก DB ไม่ทำงาน" hint="มีข้อความ MQTT แต่ไม่ถูกเขียนลง DB (mqtt_to_db.py)" /></div>
             <div className="rule-row"><Toggle on={rules.telegram.enabled} onChange={(v) => setRule('telegram', 'enabled', v)} label="ส่งเข้า Telegram" hint="TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID ใน .env" /><div className="rule-fields">ส่งตั้งแต่ระดับ <select className="select" style={{ width: 120 }} value={rules.telegram.min_level} onChange={(e) => setRule('telegram', 'min_level', e.target.value)}><option value="info">ข้อมูล (ทุกอย่าง)</option><option value="warning">เตือนขึ้นไป</option><option value="critical">วิกฤตเท่านั้น</option></select></div></div>
+            <div className="rule-row"><Toggle on={rules.model_change.enabled} onChange={(v) => setRule('model_change', 'enabled', v)} label="โมเดลเปลี่ยน" hint="model_version ของ event ใหม่ต่างจากเดิม (เปลี่ยนใน CIRA CORE)" /></div>
+            <div className="rule-row"><Toggle on={rules.daily_report.enabled} onChange={(v) => setRule('daily_report', 'enabled', v)} label="รายงานประจำวันเข้า Telegram" hint="สรุปยอดวันนี้ ส่งวันละครั้ง (ส่งเสมอไม่ขึ้นกับระดับขั้นต่ำ)" /><div className="rule-fields">เวลา {num(rules.daily_report.hour, (v) => setRule('daily_report', 'hour', v), 0, 23, 'น.')} {num(rules.daily_report.minute, (v) => setRule('daily_report', 'minute', v), 0, 59, 'นาที')}</div></div>
             <div className="card-kicker">ฐานข้อมูลล่ม บันทึกเสมอ: watcher เก็บไว้ในหน่วยความจำแล้วเขียนลง DB ตอนกลับมา</div>
             {rulesMsg && <div className="card-kicker" style={{ color: rulesMsg.startsWith('บันทึกแล้ว') ? '#1a7f47' : '#c4564d' }}>{rulesMsg}</div>}
           </div> : <div className="empty">{rulesMsg || 'กำลังโหลด...'}</div>}
@@ -816,6 +826,7 @@ type SystemHealth = {
 };
 
 function SystemView() {
+  const shell = useContext(ShellContext);
   const [devices, setDevices] = useState<DeviceStatus[]>([]);
   const [health, setHealth] = useState<SystemHealth>({ db: 'unknown', mqtt: 'unknown', internet: 'unknown', checked_at: null });
   const [loading, setLoading] = useState(true);
@@ -835,6 +846,7 @@ function SystemView() {
         if (active) {
           setDevices(payload.devices || []);
           if (healthResponse.ok) {
+            shell.report({ mqtt: healthPayload.mqtt || 'unknown', db: healthPayload.db || 'unknown', internet: healthPayload.internet || 'unknown' });
             setHealth({
               db: healthPayload.db || 'unknown',
               mqtt: healthPayload.mqtt || 'unknown',
@@ -866,27 +878,214 @@ function SystemView() {
   const healthTone = (state: SystemHealth[keyof SystemHealth]) => state === 'online' ? 'good' : state === 'offline' ? 'bad' : 'neutral';
   const healthLabel = (state: SystemHealth[keyof SystemHealth]) => state === 'online' ? 'Online' : state === 'offline' ? 'Offline' : 'ไม่ทราบ';
 
-  return <><PageHeader page="system" /><div className="card pad"><SectionHeader title="System health" kicker="ตรวจสอบทุก 2 วินาที · การเปลี่ยนสถานะถูกบันทึกใน system_logs" /><div className="summary-strip health-strip"><div className="summary-tile"><span>Database</span><strong><StatusPill tone={healthTone(health.db)}>{healthLabel(health.db)}</StatusPill></strong></div><div className="summary-tile"><span>MQTT broker</span><strong><StatusPill tone={healthTone(health.mqtt)}>{healthLabel(health.mqtt)}</StatusPill></strong></div><div className="summary-tile"><span>Internet</span><strong><StatusPill tone={healthTone(health.internet)}>{healthLabel(health.internet)}</StatusPill></strong></div><div className="summary-tile"><span>ตรวจล่าสุด</span><strong style={{ fontSize: 13 }}>{health.checked_at ? formatThaiTime(health.checked_at) : '-'}</strong></div></div></div><div className="card pad" style={{ marginTop: 18 }}><SectionHeader title="Device status" kicker="ข้อมูลล่าสุดจาก VIEW device_status_live" /><div className="table-wrap">{loading ? <div className="empty">กำลังโหลดสถานะอุปกรณ์...</div> : error ? <div className="empty" style={{ color: '#c4564d' }}>{error}</div> : !devices.length ? <div className="empty">ไม่พบอุปกรณ์ในฐานข้อมูล</div> : <table className="data-table"><thead><tr><th>Device ID</th><th>Source type</th><th>State</th><th>Last seen (เวลาไทย)</th><th>Age</th></tr></thead><tbody>{devices.map((device) => <tr key={device.device_id}><td><strong>{device.device_id}</strong></td><td>{device.source_type || '-'}</td><td><StatusPill tone={stateTone(device.state)}>{device.state || '-'}</StatusPill></td><td>{formatThaiTime(device.last_seen)}</td><td>{device.age_sec == null ? '-' : `${device.age_sec} วินาที`}</td></tr>)}</tbody></table>}</div></div></>;
+  return <><PageHeader page="system" /><div className="card pad"><SectionHeader title="System health" kicker="ตรวจสอบทุก 2 วินาที · การเปลี่ยนสถานะถูกบันทึกใน system_logs" /><div className="summary-strip health-strip"><div className="summary-tile"><span>Database</span><strong><StatusPill tone={healthTone(health.db)}>{healthLabel(health.db)}</StatusPill></strong></div><div className="summary-tile"><span>MQTT broker</span><strong><StatusPill tone={healthTone(health.mqtt)}>{healthLabel(health.mqtt)}</StatusPill></strong></div><div className="summary-tile"><span>Internet</span><strong><StatusPill tone={healthTone(health.internet)}>{healthLabel(health.internet)}</StatusPill></strong></div><div className="summary-tile"><span>ตรวจล่าสุด</span><strong style={{ fontSize: 13 }}>{health.checked_at ? formatThaiTime(health.checked_at) : '-'}</strong></div></div></div><div className="card pad" style={{ marginTop: 18 }}><SectionHeader title="Device status" kicker="ข้อมูลล่าสุดจาก VIEW device_status_live" /><div className="table-wrap">{loading ? <div className="empty">กำลังโหลดสถานะอุปกรณ์...</div> : error ? <div className="empty" style={{ color: '#c4564d' }}>{error}</div> : !devices.length ? <div className="empty">ไม่พบอุปกรณ์ในฐานข้อมูล</div> : <table className="data-table"><thead><tr><th>Device ID</th><th>Source type</th><th>State</th><th>Last seen (เวลาไทย)</th><th>Age</th></tr></thead><tbody>{devices.map((device) => <tr key={device.device_id}><td><strong>{device.device_id}</strong></td><td>{device.source_type || '-'}</td><td><StatusPill tone={stateTone(device.state)}>{device.state || '-'}</StatusPill></td><td>{formatThaiTime(device.last_seen)}</td><td>{device.age_sec == null ? '-' : `${device.age_sec} วินาที`}</td></tr>)}</tbody></table>}</div></div><DataQualityCard /></>;
 }
 
-function ProfilesView({ profiles, setProfiles }: { profiles: FruitProfile[]; setProfiles: React.Dispatch<React.SetStateAction<FruitProfile[]>> }) {
-  const [editing, setEditing] = useState<string | null>(null); const [draft, setDraft] = useState<FruitProfile | null>(null); const [toast, setToast] = useState('');
-  const openEdit = (profile: FruitProfile) => { setEditing(profile.id); setDraft({ ...profile }); };
-  const save = () => { if (!draft) return; setProfiles((items) => items.map((item) => item.id === draft.id ? draft : item)); setEditing(null); setToast(`บันทึก profile ${draft.fruit_type} แล้ว`); window.setTimeout(() => setToast(''), 2000); };
-  const exportConfig = () => { const blob = new Blob([JSON.stringify(profiles, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'cira-core-fruit-profiles.json'; link.click(); URL.revokeObjectURL(link.href); setToast('ส่งออก profile config แล้ว'); window.setTimeout(() => setToast(''), 1900); };
-  const addProfile = () => { if (profiles.some((item) => item.id === 'dragonfruit')) { setToast('มีโปรไฟล์แก้วมังกรแล้ว'); window.setTimeout(() => setToast(''), 1900); return; } setProfiles((items) => [...items, { id: 'dragonfruit', fruit_type: 'แก้วมังกร', emoji: '🐉', color: '#7a3d8a', threshold: 65, nirSupported: false, nirParams: '—', beltSpeed: 50, enabled: true, note: 'โปรไฟล์ที่เพิ่มแบบจำลอง' }]); setToast('เพิ่มโปรไฟล์แก้วมังกรแล้ว'); window.setTimeout(() => setToast(''), 1900); };
-  return <><PageHeader page="profiles" actions={<><button className="btn btn-ghost" onClick={exportConfig}><Download size={14} /> Export config</button><button className="btn btn-primary" onClick={addProfile}><Tag size={14} /> Add profile</button></>} /><div className="info-callout" style={{ marginBottom: 18 }}><Settings2 size={16} /><div><strong>Profile-driven detection</strong><p>เมื่อเปลี่ยนค่าที่นี่ จะมีผลกับ threshold, NIR และความเร็วสายพานของชนิดผลไม้ใน simulation รอบถัดไป</p></div></div><div className="profile-grid">{profiles.map((profile) => <div className="card profile-card" key={profile.id}><div className="profile-top"><div className="fruit-emoji">{profile.emoji}</div><StatusPill tone={profile.enabled ? 'good' : 'neutral'}>{profile.enabled ? 'Enabled' : 'Disabled'}</StatusPill></div><div className="profile-name">{profile.fruit_type}</div><div className="profile-note">{profile.note}</div><div className="profile-fields"><div className="profile-field"><span>Defect threshold</span><strong>{profile.threshold}%</strong></div><div className="profile-field"><span>NIR capability</span><strong style={{ color: profile.nirSupported ? '#1aa55c' : '#b86f34' }}>{profile.nirSupported ? 'External + internal' : 'External only'}</strong></div><div className="profile-field"><span>NIR parameters</span><strong>{profile.nirParams}</strong></div><div className="profile-field"><span>Belt speed</span><strong>{profile.beltSpeed}%</strong></div></div><div className="profile-actions"><button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => openEdit(profile)}><Settings2 size={13} /> Edit profile</button><button className={`btn ${profile.enabled ? 'btn-danger' : 'btn-primary'}`} onClick={() => setProfiles((items) => items.map((item) => item.id === profile.id ? { ...item, enabled: !item.enabled } : item))}>{profile.enabled ? 'ปิดใช้' : 'เปิดใช้'}</button></div></div>)}</div>{editing && draft && <div className="card pad" style={{ marginTop: 18, borderColor: '#9bd2ac' }}><SectionHeader title={`แก้ไขโปรไฟล์ · ${draft.fruit_type}`} kicker="ค่าจะถูกใช้ใน simulation รอบถัดไป" action={<button className="btn btn-ghost btn-icon" onClick={() => setEditing(null)}><X size={15} /></button>} /><div className="form-grid"><div><label className="form-label">Defect threshold (%)</label><input className="input" type="number" value={draft.threshold} onChange={(e) => setDraft({ ...draft, threshold: Number(e.target.value) })} /></div><div><label className="form-label">Belt speed (%)</label><input className="input" type="number" value={draft.beltSpeed} onChange={(e) => setDraft({ ...draft, beltSpeed: Number(e.target.value) })} /></div><div><label className="form-label">NIR parameters</label><input className="input" value={draft.nirParams} disabled={!draft.nirSupported} onChange={(e) => setDraft({ ...draft, nirParams: e.target.value })} /></div><div><label className="form-label">Capability</label><div className="input" style={{ color: draft.nirSupported ? '#1aa55c' : '#b86f34' }}>{draft.nirSupported ? 'ตรวจภายนอก + ภายใน (NIR)' : 'ตรวจภายนอกเท่านั้น · NIR ไม่รองรับ'}</div></div></div><div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}><button className="btn btn-ghost" onClick={() => setEditing(null)}>ยกเลิก</button><button className="btn btn-primary" onClick={save}><Save size={14} /> Save profile</button></div></div>}{toast && <div className="toast"><Check size={14} style={{ verticalAlign: 'middle', marginRight: 7 }} />{toast}</div>}</>;
+type ProfilesData = {
+  fruits: { code: string; name_th: string | null; name_en: string | null; icon: string | null; total_7d: number; defect_7d: number; defect_rate_7d: number | null; avg_conf_7d: number | null; last_seen: string | null }[];
+  defects: { code: string; name_th: string | null; name_en: string | null; seen_7d: number }[];
+  models: { model_version: string; model_source: string; precision: number | null; recall: number | null; map: number | null; threshold: number | null; created_at: string | null; last_seen: string | null }[];
+};
+const pctText = (value: number | null | undefined, digits = 1) => value == null ? '-' : `${value.toFixed(digits)}%`;
+const metricText = (value: number | null) => value == null ? '-' : value <= 1 ? value.toFixed(3) : value.toFixed(1);
+
+function ProfilesView() {
+  const [data, setData] = useState<ProfilesData | null>(null); const [error, setError] = useState('');
+  useEffect(() => {
+    fetch('/api/profiles', { cache: 'no-store' }).then(async (r) => { const p = await r.json() as ProfilesData & { error?: string }; if (!r.ok) throw new Error(p.error || 'โหลดไม่สำเร็จ'); setData(p); }).catch((e: unknown) => setError(e instanceof Error ? e.message : 'โหลดไม่สำเร็จ'));
+  }, []);
+  return <><PageHeader page="profiles" />
+    <div className="info-callout" style={{ marginBottom: 18 }}><Info size={16} /><div><strong>อ่านอย่างเดียว</strong><p>threshold, ความเร็วสายพาน, กล้อง และโมเดล ตั้งค่าใน CIRA CORE เท่านั้น · หน้านี้แสดงสิ่งที่ระบบรู้จัก (ตาราง fruit_types / defect_types / models) และสิ่งที่เห็นจริงใน 7 วันล่าสุด · โมเดลใหม่ถูกลงทะเบียนอัตโนมัติเมื่อมี event แรกเข้ามา</p></div></div>
+    {error && <div className="live-banner error" style={{ marginBottom: 14 }}>{error}</div>}
+    <div className="profile-grid">{data?.fruits.map((fruit) => <div className="card profile-card" key={fruit.code}>
+      <div className="profile-top"><div className="fruit-emoji">{fruit.icon ?? liveEmoji(fruit.code)}</div><StatusPill tone={fruit.total_7d ? 'good' : 'neutral'}>{fruit.total_7d ? 'มีข้อมูล 7 วัน' : 'ไม่มีข้อมูล 7 วัน'}</StatusPill></div>
+      <div className="profile-name">{fruit.name_th ?? fruit.code}</div><div className="profile-note">{fruit.name_en ?? ''} · code <code>{fruit.code}</code></div>
+      <div className="profile-fields">
+        <div className="profile-field"><span>คัด 7 วัน</span><strong>{fruit.total_7d.toLocaleString()} ผล</strong></div>
+        <div className="profile-field"><span>Defect rate 7 วัน</span><strong>{pctText(fruit.defect_rate_7d)}</strong></div>
+        <div className="profile-field"><span>Confidence เฉลี่ย</span><strong>{pctText(fruit.avg_conf_7d)}</strong></div>
+        <div className="profile-field"><span>เห็นล่าสุด</span><strong>{fruit.last_seen ? logDateTime(fruit.last_seen) : '-'}</strong></div>
+      </div>
+    </div>)}</div>
+    {!data && !error && <div className="empty">กำลังโหลด...</div>}
+    {data && <div className="section-grid grid-2" style={{ marginTop: 18, alignItems: 'start' }}>
+      <div className="card pad"><SectionHeader title="ชนิดตำหนิ (defect_types)" kicker="defect_type ที่ไม่อยู่ในตารางนี้จะถูกเก็บเป็น NULL · ดูที่ System Status" />
+        <div className="table-wrap"><table className="data-table" style={{ minWidth: 0 }}><thead><tr><th>code</th><th>ชื่อไทย</th><th>English</th><th>พบ 7 วัน</th></tr></thead><tbody>{data.defects.map((d) => <tr key={d.code}><td><strong>{d.code}</strong></td><td>{d.name_th ?? '-'}</td><td>{d.name_en ?? '-'}</td><td>{d.seen_7d.toLocaleString()}</td></tr>)}</tbody></table></div></div>
+      <div className="card pad"><SectionHeader title="โมเดล (models)" kicker="precision / recall / mAP กรอกเมื่อทีม B ส่งผลมา" />
+        <div className="table-wrap"><table className="data-table" style={{ minWidth: 0 }}><thead><tr><th>model_version</th><th>source</th><th>precision</th><th>recall</th><th>mAP</th><th>เห็นล่าสุด</th></tr></thead><tbody>{data.models.map((m) => <tr key={m.model_version}><td><strong>{m.model_version}</strong></td><td>{m.model_source}</td><td>{metricText(m.precision)}</td><td>{metricText(m.recall)}</td><td>{metricText(m.map)}</td><td>{m.last_seen ? logDateTime(m.last_seen) : 'ยังไม่มี event'}</td></tr>)}</tbody></table></div></div>
+    </div>}
+  </>;
 }
 
-type UserRecord = { id: string; name: string; initials: string; email: string; role: string; status: 'Active' | 'Inactive'; lastSeen: string };
+type RunRow = { device_id: string; start: string; end: string | null; end_state: string | null; running: boolean; duration_sec: number; total: number; good: number; defect: number; defect_rate: number | null; avg_conf: number | null; per_min: number | null; models: string[]; first_event: string | null; last_event: string | null; alerts: number };
+type ModelRow = { model: string; source: string | null; total: number; defect: number; defect_rate: number | null; avg_conf: number | null; median_conf: number | null; low_conf_pct: number | null; defect_untyped: number; first_seen: string | null; last_seen: string | null; registered: boolean; metrics: { precision: number | null; recall: number | null; map: number | null; threshold: number | null } | null; by_fruit: { fruit: string; total: number; defect: number; defect_rate: number | null }[] };
+
+function RunsView() {
+  const [days, setDays] = useState(7); const [range, setRange] = useState('7d');
+  const [runs, setRuns] = useState<{ runs: RunRow[]; history_since: string | null } | null>(null);
+  const [models, setModels] = useState<ModelRow[] | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    const load = () => fetch(`/api/runs?days=${days}`, { cache: 'no-store' }).then(async (r) => { const p = await r.json() as { runs: RunRow[]; history_since: string | null; error?: string }; if (!r.ok) throw new Error(p.error || 'โหลดรอบการทำงานไม่สำเร็จ'); if (active) { setRuns(p); setError(''); } }).catch((e: unknown) => active && setError(e instanceof Error ? e.message : 'โหลดไม่สำเร็จ'));
+    void load();
+    const id = window.setInterval(() => { if (!document.hidden) void load(); }, 15000);
+    return () => { active = false; window.clearInterval(id); };
+  }, [days]);
+  useEffect(() => {
+    let active = true;
+    const load = () => fetch(`/api/models?range=${range}`, { cache: 'no-store' }).then(async (r) => { const p = await r.json() as { models: ModelRow[]; error?: string }; if (!r.ok) throw new Error(p.error || 'โหลดสถิติโมเดลไม่สำเร็จ'); if (active) setModels(p.models); }).catch((e: unknown) => active && setError(e instanceof Error ? e.message : 'โหลดไม่สำเร็จ'));
+    void load();
+    const id = window.setInterval(() => { if (!document.hidden) void load(); }, 30000);
+    return () => { active = false; window.clearInterval(id); };
+  }, [range]);
+
+  const list = runs?.runs ?? [];
+  const sum = list.reduce((acc, r) => ({ total: acc.total + r.total, defect: acc.defect + r.defect, sec: acc.sec + r.duration_sec }), { total: 0, defect: 0, sec: 0 });
+  const exportRuns = () => csvDownload('cira-core-runs.csv', ['device_id', 'start_bangkok', 'end_bangkok', 'end_state', 'duration_min', 'total', 'good', 'defect', 'defect_rate_pct', 'avg_conf_pct', 'per_min', 'models', 'alerts'],
+    list.map((r) => [r.device_id, logDateTime(r.start), r.end ? logDateTime(r.end) : 'running', r.end_state, (r.duration_sec / 60).toFixed(1), r.total, r.good, r.defect, r.defect_rate == null ? null : r.defect_rate.toFixed(1), r.avg_conf == null ? null : r.avg_conf.toFixed(1), r.per_min == null ? null : r.per_min.toFixed(1), r.models.join(' '), r.alerts]));
+  const exportModels = () => csvDownload('cira-core-models.csv', ['model', 'source', 'total', 'defect', 'defect_rate_pct', 'avg_conf_pct', 'median_conf_pct', 'low_conf_pct', 'defect_without_type', 'first_seen', 'last_seen'],
+    (models ?? []).map((m) => [m.model, m.source, m.total, m.defect, m.defect_rate == null ? null : m.defect_rate.toFixed(1), m.avg_conf == null ? null : m.avg_conf.toFixed(1), m.median_conf == null ? null : m.median_conf.toFixed(1), m.low_conf_pct == null ? null : m.low_conf_pct.toFixed(1), m.defect_untyped, m.first_seen, m.last_seen]));
+
+  return <><PageHeader page="runs" />
+    {error && <div className="live-banner error" style={{ marginBottom: 14 }}>{error}</div>}
+    <div className="summary-strip" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 18 }}>
+      <div className="summary-tile"><span>รอบการทำงาน ({days} วัน)</span><strong>{runs ? list.length : '-'}</strong>{list[0]?.running && <span style={{ color: '#1a7f47' }}>กำลังทำงาน 1 รอบ</span>}</div>
+      <div className="summary-tile"><span>คัดรวมในรอบ</span><strong>{sum.total.toLocaleString()}</strong></div>
+      <div className="summary-tile"><span>Defect rate รวม</span><strong>{sum.total ? `${((sum.defect / sum.total) * 100).toFixed(1)}%` : '-'}</strong></div>
+      <div className="summary-tile"><span>เวลาเครื่องทำงานรวม</span><strong>{alertDuration(sum.sec)}</strong></div>
+    </div>
+    <div className="card pad">
+      <SectionHeader title="รอบการทำงาน" kicker={`เริ่มเมื่อสถานะเป็น playing/started · จบเมื่อ offline/end · บันทึกสถานะตั้งแต่ ${runs?.history_since ? logDateTime(runs.history_since) : '-'}`} action={<div style={{ display: 'flex', gap: 6 }}>
+        <select className="select" style={{ width: 96 }} aria-label="ช่วงเวลา" value={days} onChange={(e) => setDays(Number(e.target.value))}><option value={1}>24 ชม.</option><option value={7}>7 วัน</option><option value={30}>30 วัน</option></select>
+        <button type="button" className="btn btn-ghost" onClick={exportRuns} disabled={!list.length}><Download size={14} /> CSV</button></div>} />
+      <div className="table-wrap"><table className="data-table"><thead><tr><th>เริ่ม</th><th>จบ</th><th>ระยะเวลา</th><th>อุปกรณ์</th><th>คัด</th><th>ดี</th><th>เสีย</th><th>Defect</th><th>Conf.</th><th>ผล/นาที</th><th>โมเดล</th><th>Alert</th></tr></thead>
+        <tbody>{list.map((r) => <tr key={`${r.device_id}-${r.start}`}>
+          <td><strong>{logDateTime(r.start)}</strong></td>
+          <td>{r.running ? <StatusPill tone="good">กำลังทำงาน</StatusPill> : <>{r.end ? logDateTime(r.end) : '-'} <span style={{ color: '#9cada4' }}>{r.end_state}</span></>}</td>
+          <td>{alertDuration(r.duration_sec)}</td><td>{r.device_id}</td>
+          <td><strong>{r.total.toLocaleString()}</strong></td><td>{r.good.toLocaleString()}</td><td>{r.defect.toLocaleString()}</td>
+          <td><strong>{pctText(r.defect_rate)}</strong></td><td>{pctText(r.avg_conf)}</td><td>{r.per_min == null ? '-' : r.per_min.toFixed(1)}</td>
+          <td>{r.models.length ? r.models.map((m) => <span key={m} className="tag neutral" style={{ marginRight: 4 }}>{m}</span>) : '-'}</td>
+          <td>{r.alerts || '-'}</td>
+        </tr>)}</tbody></table>
+        {runs && !list.length && <div className="empty">ไม่มีรอบการทำงานในช่วงนี้ (เริ่มบันทึกเมื่อ alert_watcher ทำงาน)</div>}
+        {!runs && !error && <div className="empty">กำลังโหลด...</div>}</div>
+      <div className="card-kicker" style={{ marginTop: 10 }}>fruit_events ไม่มีคอลัมน์อุปกรณ์ ถ้ามีหลายกล้องทำงานพร้อมกัน ยอดของแต่ละรอบจะนับรวมกัน</div>
+    </div>
+
+    <div className="card pad" style={{ marginTop: 18 }}>
+      <SectionHeader title="เทียบโมเดล" kicker="แยกตาม model_version ที่ CIRA CORE ใส่มาใน event · เปลี่ยนโมเดลใน CORE แล้ว watcher แจ้ง alert" action={<div style={{ display: 'flex', gap: 6 }}>
+        <select className="select" style={{ width: 96 }} aria-label="ช่วงเวลา" value={range} onChange={(e) => setRange(e.target.value)}><option value="24h">24 ชม.</option><option value="7d">7 วัน</option><option value="30d">30 วัน</option><option value="all">ทั้งหมด</option></select>
+        <button type="button" className="btn btn-ghost" onClick={exportModels} disabled={!models?.length}><Download size={14} /> CSV</button></div>} />
+      <div className="table-wrap"><table className="data-table"><thead><tr><th>โมเดล</th><th>source</th><th>คัด</th><th>Defect rate</th><th>Conf. เฉลี่ย</th><th>Conf. median</th><th title="confidence ต่ำกว่า 60%">Conf. &lt; 60%</th><th>เสียแต่ไม่ระบุตำหนิ</th><th>แยกตามผลไม้</th><th>ใช้ช่วง</th><th>precision / recall</th></tr></thead>
+        <tbody>{(models ?? []).map((m) => <tr key={m.model}>
+          <td><strong>{m.model}</strong>{!m.registered && <span className="tag warn" style={{ marginLeft: 6 }}>ไม่อยู่ใน models</span>}</td><td>{m.source ?? '-'}</td>
+          <td>{m.total.toLocaleString()}</td><td><strong>{pctText(m.defect_rate)}</strong></td><td>{pctText(m.avg_conf)}</td><td>{pctText(m.median_conf)}</td><td>{pctText(m.low_conf_pct)}</td><td>{m.defect_untyped.toLocaleString()}</td>
+          <td>{m.by_fruit.map((f) => <span key={f.fruit} className="tag neutral" style={{ marginRight: 4 }}>{liveEmoji(f.fruit)} {f.total.toLocaleString()} · {pctText(f.defect_rate, 0)}</span>)}</td>
+          <td>{m.first_seen ? logDateTime(m.first_seen) : '-'} – {m.last_seen ? logDateTime(m.last_seen) : '-'}</td>
+          <td>{m.metrics && (m.metrics.precision != null || m.metrics.recall != null) ? `${metricText(m.metrics.precision)} / ${metricText(m.metrics.recall)}` : '-'}</td>
+        </tr>)}</tbody></table>
+        {models && !models.length && <div className="empty">ไม่มี event ในช่วงนี้</div>}</div>
+      <div className="card-kicker" style={{ marginTop: 10 }}>defect rate ต่างกันระหว่างโมเดลอาจมาจากผลไม้ล็อตต่างกัน · เทียบให้แฟร์ใช้ชุดทดสอบเดียวกัน (ภาพหน้างานจากทีม A)</div>
+    </div>
+  </>;
+}
+
+type DataQuality = {
+  range: string; stored: number; rejected: number; dedup_dropped: number;
+  reasons: { reason: string; n: number }[];
+  unknown: { fruit: number; defect: number; model: number; defect_untyped: number; no_track: number; fruit_values: string[]; defect_values: string[]; model_values: string[] };
+  rejects: { id: number; ts: string; reason: string; payload: string }[];
+};
+const rejectReasonLabel: Record<string, string> = {
+  invalid_json: 'JSON เสีย', not_a_json_object: 'ไม่ใช่ JSON object', missing_event_id: 'ไม่มี event_id', missing_timestamp: 'ไม่มี timestamp',
+  bad_timestamp: 'timestamp ผิดรูปแบบ', bad_external_result: 'external_result ไม่ใช่ good/defect', bad_confidence: 'confidence ไม่ใช่ตัวเลข',
+};
+const rejectLabel = (reason: string) => rejectReasonLabel[reason.split(' ')[0]] ?? (reason.startsWith('db_rejected') ? 'DB ไม่รับ' : reason);
+
+function DataQualityCard() {
+  const [range, setRange] = useState('24h'); const [data, setData] = useState<DataQuality | null>(null); const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    const load = () => fetch(`/api/data-quality?range=${range}`, { cache: 'no-store' }).then(async (r) => { const p = await r.json() as DataQuality & { error?: string }; if (!r.ok) throw new Error(p.error || 'โหลดไม่สำเร็จ'); if (active) { setData(p); setError(''); } }).catch((e: unknown) => active && setError(e instanceof Error ? e.message : 'โหลดไม่สำเร็จ'));
+    void load();
+    const id = window.setInterval(() => { if (!document.hidden) void load(); }, 15000);
+    return () => { active = false; window.clearInterval(id); };
+  }, [range]);
+  const u = data?.unknown;
+  const unknownTotal = u ? u.fruit + u.defect + u.model : 0;
+  return <div className="card pad" style={{ marginTop: 18 }}>
+    <SectionHeader title="คุณภาพข้อมูลจาก CIRA CORE" kicker="จาก mqtt_to_db.py · payload ที่ถูกปฏิเสธ ผลไม้ที่ส่งซ้ำ และค่าที่ระบบไม่รู้จัก" action={<select className="select" style={{ width: 96 }} aria-label="ช่วงเวลา" value={range} onChange={(e) => setRange(e.target.value)}><option value="1h">1 ชม.</option><option value="24h">24 ชม.</option><option value="7d">7 วัน</option></select>} />
+    {error && <div className="live-banner error">{error}</div>}
+    <div className="summary-strip" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 14 }}>
+      <div className="summary-tile"><span>เก็บลง DB</span><strong>{data ? data.stored.toLocaleString() : '-'}</strong></div>
+      <div className="summary-tile"><span>ถูกปฏิเสธ (ไม่เก็บ)</span><strong style={{ color: data?.rejected ? '#d3574e' : undefined }}>{data ? data.rejected.toLocaleString() : '-'}</strong></div>
+      <div className="summary-tile"><span>ผลไม้ส่งซ้ำ (ทิ้ง)</span><strong>{data ? data.dedup_dropped.toLocaleString() : '-'}</strong><span>run + track_id เดียวกัน</span></div>
+      <div className="summary-tile"><span>ค่าที่ไม่รู้จัก (เก็บเป็น NULL)</span><strong style={{ color: unknownTotal ? '#b86f34' : undefined }}>{data ? unknownTotal.toLocaleString() : '-'}</strong>{u && unknownTotal > 0 && <span>{[...u.fruit_values.map((v) => `fruit ${v}`), ...u.defect_values.map((v) => `defect ${v}`), ...u.model_values.map((v) => `model ${v}`)].slice(0, 4).join(', ')}</span>}</div>
+    </div>
+    {data && data.reasons.length > 0 && <div className="live-defects" style={{ marginBottom: 12 }}>สาเหตุ: {data.reasons.map((r) => <span key={r.reason} className="tag warn">{rejectLabel(r.reason)} {r.n}</span>)}</div>}
+    {u && (u.defect_untyped > 0 || u.no_track > 0) && <div className="card-kicker" style={{ marginBottom: 12 }}>{u.defect_untyped > 0 ? `เสียแต่ไม่มี defect_type ${u.defect_untyped.toLocaleString()} ผล · ` : ''}{u.no_track > 0 ? `ไม่มี track_id ${u.no_track.toLocaleString()} ผล (กันนับซ้ำไม่ได้)` : ''}</div>}
+    <div className="table-wrap" style={{ maxHeight: 320, overflowY: 'auto' }}>{data?.rejects.length ? <table className="data-table" style={{ minWidth: 0 }}><thead><tr><th>เวลา</th><th>สาเหตุ</th><th>payload (200 ตัวอักษรแรก)</th></tr></thead><tbody>{data.rejects.map((r) => <tr key={r.id}><td>{logDateTime(r.ts)}</td><td><StatusPill tone="warn">{rejectLabel(r.reason)}</StatusPill></td><td style={{ whiteSpace: 'normal', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 10, wordBreak: 'break-all' }}>{r.payload}</td></tr>)}</tbody></table> : <div className="empty">{data ? 'ไม่มี payload ที่ถูกปฏิเสธในช่วงนี้' : 'กำลังโหลด...'}</div>}</div>
+  </div>;
+}
+
+type UserRow = { id: number; email: string; name: string; role: 'admin' | 'viewer'; active: boolean; created_at: string | null; last_login_at: string | null; acks: number };
 function UsersView() {
-  const [users, setUsers] = useState<UserRecord[]>(mockUsers.map((user) => ({ ...user }))); const [toast, setToast] = useState('');
-  const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(''), 1800); };
-  const toggle = (id: string) => { setUsers((items) => items.map((user) => user.id === id ? { ...user, status: user.status === 'Active' ? 'Inactive' : 'Active' } : user)); notify('อัปเดตสถานะผู้ใช้แล้ว'); };
-  const addUser = () => { setUsers((items) => [...items, { id: `USR-${String(items.length + 1).padStart(3, '0')}`, name: 'New Operator', initials: 'NO', email: 'new.operator@ciracore.ai', role: 'Operator', status: 'Active', lastSeen: 'เพิ่งเพิ่ม' }]); notify('เพิ่มผู้ใช้จำลองแล้ว'); };
-  const editRole = (id: string) => { const roles = ['Admin', 'Operator', 'Viewer']; setUsers((items) => items.map((user) => { if (user.id !== id) return user; const next = roles[(roles.indexOf(user.role) + 1) % roles.length]; return { ...user, role: next }; })); notify('อัปเดต role แล้ว'); };
-  const exportUsers = () => { const blob = new Blob([toCsv(users, ['id','name','email','role','status','lastSeen'])], { type: 'text/csv;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'cira-core-users.csv'; link.click(); URL.revokeObjectURL(link.href); notify('ส่งออก users CSV แล้ว'); };
-  return <><PageHeader page="users" actions={<><button className="btn btn-ghost" onClick={exportUsers}><Download size={14} /> Export users</button><button className="btn btn-primary" onClick={addUser}><Users size={14} /> Add user</button></>} /><div className="metric-grid"><MetricCard label="Total users" value={users.length} foot="ใน workspace นี้" /><MetricCard label="Active now" value={users.filter((u) => u.status === 'Active').length} foot="มีสิทธิ์เข้าใช้งาน" tone="green" /><MetricCard label="Operators" value={users.filter((u) => u.role === 'Operator').length} foot="ควบคุมเครื่องได้" /><MetricCard label="Viewers" value={users.filter((u) => u.role === 'Viewer').length} foot="อ่านอย่างเดียว" /></div><div className="card pad"><SectionHeader title="Workspace members" kicker="role-based access · mock auth" /><div className="table-wrap"><table className="data-table"><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th>Last active</th><th /></tr></thead><tbody>{users.map((user) => <tr key={user.id}><td><div style={{ display: 'flex', alignItems: 'center', gap: 9 }}><div className="avatar" style={{ width: 28, height: 28, background: user.role === 'Admin' ? '#10352a' : '#1aa55c' }}>{user.initials}</div><div><strong>{user.name}</strong><div style={{ color: '#9aaaA2', fontSize: 9, marginTop: 3 }}>{user.id}</div></div></div></td><td>{user.email}</td><td><StatusPill tone={user.role === 'Admin' ? 'good' : user.role === 'Operator' ? 'warn' : 'neutral'}>{user.role}</StatusPill></td><td><StatusPill tone={user.status === 'Active' ? 'good' : 'neutral'}>{user.status}</StatusPill></td><td>{user.lastSeen}</td><td><div style={{ display: 'flex', gap: 5 }}><button className="btn btn-ghost btn-sm" onClick={() => editRole(user.id)}>Edit role</button><button className="btn btn-ghost btn-sm" onClick={() => toggle(user.id)}>{user.status === 'Active' ? 'Disable' : 'Enable'}</button></div></td></tr>)}</tbody></table></div></div><div className="card pad" style={{ marginTop: 18 }}><SectionHeader title="Role permissions" kicker="สิทธิ์ตามบทบาทของระบบจำลอง" /><div className="grid-3"><div className="summary-tile"><StatusPill tone="good">Admin</StatusPill><p style={{ color: '#7b8e84', fontSize: 11, lineHeight: 1.5 }}>จัดการ profiles, users, system settings และควบคุมเครื่อง</p></div><div className="summary-tile"><StatusPill tone="warn">Operator</StatusPill><p style={{ color: '#7b8e84', fontSize: 11, lineHeight: 1.5 }}>ควบคุม simulation, acknowledge alert และดู report</p></div><div className="summary-tile"><StatusPill tone="neutral">Viewer</StatusPill><p style={{ color: '#7b8e84', fontSize: 11, lineHeight: 1.5 }}>อ่าน log, dashboard และรายงานโดยไม่แก้ค่า</p></div></div></div>{toast && <div className="toast"><Check size={14} style={{ verticalAlign: 'middle', marginRight: 7 }} />{toast}</div>}</>;
+  const { user } = useAuth();
+  const [users, setUsers] = useState<UserRow[] | null>(null); const [error, setError] = useState(''); const [toast, setToast] = useState('');
+  const [form, setForm] = useState({ name: '', email: '', role: 'viewer', password: '' }); const [formError, setFormError] = useState('');
+  const notify = (text: string) => { setToast(text); window.setTimeout(() => setToast(''), 2200); };
+  const load = () => fetch('/api/users', { cache: 'no-store' }).then(async (r) => { const p = await r.json() as { users: UserRow[]; error?: string }; if (!r.ok) throw new Error(p.error || 'โหลดผู้ใช้ไม่สำเร็จ'); setUsers(p.users); setError(''); }).catch((e: unknown) => setError(e instanceof Error ? e.message : 'โหลดไม่สำเร็จ'));
+  useEffect(() => { if (user?.role === 'admin') void load(); }, [user?.role]);
+  if (user?.role !== 'admin') return <><PageHeader page="users" /><div className="empty">หน้านี้สำหรับ Admin เท่านั้น</div></>;
+
+  const patch = async (id: number, body: object, message: string) => {
+    const response = await fetch(`/api/users/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const payload = await response.json() as { error?: string };
+    notify(response.ok ? message : payload.error || 'บันทึกไม่สำเร็จ'); void load();
+  };
+  const resetPassword = (row: UserRow) => {
+    const password = window.prompt(`รหัสผ่านใหม่ของ ${row.name} (อย่างน้อย 8 ตัวอักษร)`);
+    if (password) void patch(row.id, { password }, 'เปลี่ยนรหัสผ่านแล้ว · ผู้ใช้ถูก logout ทุกเครื่อง');
+  };
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault(); setFormError('');
+    const response = await fetch('/api/users', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(form) });
+    const payload = await response.json() as { error?: string };
+    if (!response.ok) { setFormError(payload.error || 'เพิ่มผู้ใช้ไม่สำเร็จ'); return; }
+    setForm({ name: '', email: '', role: 'viewer', password: '' }); notify('เพิ่มผู้ใช้แล้ว'); void load();
+  };
+  const list = users ?? [];
+  return <><PageHeader page="users" />
+    {error && <div className="live-banner error" style={{ marginBottom: 14 }}>{error}</div>}
+    <div className="metric-grid"><MetricCard label="ผู้ใช้ทั้งหมด" value={list.length} /><MetricCard label="ใช้งานได้" value={list.filter((u) => u.active).length} tone="green" /><MetricCard label="Admin" value={list.filter((u) => u.role === 'admin' && u.active).length} /><MetricCard label="Viewer" value={list.filter((u) => u.role === 'viewer' && u.active).length} /></div>
+    <div className="card pad"><SectionHeader title="บัญชีผู้ใช้" kicker="รหัสผ่านเก็บแบบ scrypt hash · ปิดใช้หรือเปลี่ยนรหัสแล้วผู้ใช้ถูก logout ทันที" />
+      <div className="table-wrap"><table className="data-table"><thead><tr><th>ผู้ใช้</th><th>อีเมล</th><th>Role</th><th>สถานะ</th><th>เข้าระบบล่าสุด</th><th>รับทราบ alert</th><th /></tr></thead>
+        <tbody>{list.map((row) => <tr key={row.id}>
+          <td><div style={{ display: 'flex', alignItems: 'center', gap: 9 }}><div className="avatar" style={{ width: 28, height: 28, background: row.role === 'admin' ? '#10352a' : '#1aa55c' }}>{initialsOf(row.name)}</div><strong>{row.name}</strong>{row.id === user.id && <span className="tag neutral">คุณ</span>}</div></td>
+          <td>{row.email}</td>
+          <td><select className="select" style={{ width: 96 }} value={row.role} onChange={(e) => void patch(row.id, { role: e.target.value }, 'เปลี่ยน role แล้ว')}><option value="admin">Admin</option><option value="viewer">Viewer</option></select></td>
+          <td><StatusPill tone={row.active ? 'good' : 'neutral'}>{row.active ? 'ใช้งานได้' : 'ปิดใช้'}</StatusPill></td>
+          <td>{row.last_login_at ? logDateTime(row.last_login_at) : 'ยังไม่เคย'}</td><td>{row.acks.toLocaleString()}</td>
+          <td><div style={{ display: 'flex', gap: 5 }}><button type="button" className="btn btn-ghost btn-sm" onClick={() => resetPassword(row)}>ตั้งรหัสใหม่</button><button type="button" className="btn btn-ghost btn-sm" onClick={() => void patch(row.id, { active: !row.active }, row.active ? 'ปิดใช้แล้ว' : 'เปิดใช้แล้ว')}>{row.active ? 'ปิดใช้' : 'เปิดใช้'}</button></div></td>
+        </tr>)}</tbody></table>{!users && !error && <div className="empty">กำลังโหลด...</div>}</div></div>
+    <div className="section-grid grid-2" style={{ marginTop: 18, alignItems: 'start' }}>
+      <div className="card pad"><SectionHeader title="เพิ่มผู้ใช้" />
+        <form onSubmit={(e) => void create(e)}><div className="form-grid">
+          <div><label className="form-label">ชื่อ</label><input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></div>
+          <div><label className="form-label">อีเมล</label><input className="input" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required /></div>
+          <div><label className="form-label">Role</label><select className="select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}><option value="viewer">Viewer</option><option value="admin">Admin</option></select></div>
+          <div><label className="form-label">รหัสผ่านเริ่มต้น (≥ 8 ตัว)</label><input className="input" type="password" autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={8} /></div>
+        </div>{formError && <div style={{ color: '#c4564d', fontSize: 11, marginTop: 10 }}>{formError}</div>}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}><button className="btn btn-primary" type="submit"><Users size={14} /> เพิ่มผู้ใช้</button></div></form></div>
+      <div className="card pad"><SectionHeader title="สิทธิ์ตาม role" /><div className="grid-3" style={{ gridTemplateColumns: '1fr 1fr' }}>
+        <div className="summary-tile"><StatusPill tone="good">Admin</StatusPill><p style={{ color: '#7b8e84', fontSize: 11, lineHeight: 1.5 }}>ทุกอย่างของ Viewer + แก้ alert rules / เวลารายงาน และจัดการผู้ใช้</p></div>
+        <div className="summary-tile"><StatusPill tone="neutral">Viewer</StatusPill><p style={{ color: '#7b8e84', fontSize: 11, lineHeight: 1.5 }}>ดูทุกหน้า export CSV ใช้ AI สรุป และกดรับทราบ alert (บันทึกชื่อผู้รับทราบ)</p></div>
+      </div></div>
+    </div>
+    {toast && <div className="toast"><Check size={14} style={{ verticalAlign: 'middle', marginRight: 7 }} />{toast}</div>}
+  </>;
 }
 
 function MyTeamView() {
@@ -899,21 +1098,85 @@ function MyTeamView() {
   return <><PageHeader page="myteam" /><section className="team-hero"><div className="team-hero-copy"><span className="team-kicker">CIRA CORE PROJECT</span><h2>Fruit Defect<br />Detection Engine</h2><p>ทีมของเราร่วมกันสร้างระบบคัดแยกผลไม้ให้แม่นยำ เชื่อถือได้ และพร้อมใช้งานจริง</p><div className="team-hero-meta"><span>04 สมาชิก</span><i /> <span>Vision · Sort · Trust</span></div></div><div className="team-hero-logo-wrap"><div className="team-logo-glow" /><img className="team-hero-logo" src="/images/cira-core-logo.png" alt="Fruit Defect Detection Engine logo" /></div></section><section className="team-grid">{members.map((member) => <article className={`team-member-card team-tone-${member.tone}`} key={member.order}><div className="team-card-top"><span className="team-letter">{member.letter}</span><span className="team-order">{member.order}</span><img className="team-member-photo" src={member.image} alt={`รูปของ ${member.name}`} /></div><div className="team-student-id"><span>รหัสนักศึกษา</span><strong>{member.studentId}</strong></div><div className="team-field-label">ชื่อ–นามสกุล</div><div className="team-member-name">{member.name}</div><div className="team-field-label team-role-label">หน้าที่ของแต่ละคนในทีม</div><div className="team-member-focus">{member.focus}</div><p>{member.detail}</p><div className="team-card-divider" /><div className="team-card-details"><div><span>Section / กลุ่มเรียน</span><strong>{member.section}</strong></div></div></article>)}</section></>;
 }
 
-function LoginView() {
-  const router = useRouter(); const [email, setEmail] = useState('operator@ciracore.ai'); const [password, setPassword] = useState('demo1234'); const [error, setError] = useState('');
-  const submit = (event: React.FormEvent) => { event.preventDefault(); if (!email || !password) { setError('กรุณากรอกอีเมลและรหัสผ่าน'); return; } router.push('/simulate'); };
-  return <div className="login-page"><div className="card login-card"><div className="login-logo"><Logo compact /><div><div className="brand-name">Fruit Defect Detection</div><span className="brand-sub">ENGINE BY CIRA CORE</span></div></div><h1>ยินดีต้อนรับกลับ</h1><p>เข้าสู่ระบบเพื่อดูสถานะและควบคุมไลน์คัดแยกผลไม้ของคุณ</p><form className="login-form" onSubmit={submit}><div><label className="form-label">อีเมล</label><input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div><div><label className="form-label">รหัสผ่าน</label><input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} /></div>{error && <div style={{ color: '#c4564d', fontSize: 11 }}>{error}</div>}<button className="btn btn-primary" type="submit"><LogIn size={14} /> เข้าสู่ Control Room</button></form><div className="login-demo">Demo mode · ยังไม่ต่อระบบ authentication จริง</div></div></div>;
+function LoginView({ setupRequired, onSignedIn }: { setupRequired: boolean; onSignedIn: (user: AuthUser) => void }) {
+  const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [password, setPassword] = useState('');
+  const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const [demo, setDemo] = useState<{ label: string; email: string; password: string; role: string }[]>([]);
+  useEffect(() => {
+    if (setupRequired) return;
+    fetch('/api/auth/demo', { cache: 'no-store' }).then((r) => r.json()).then((p: { accounts?: typeof demo }) => {
+      const accounts = p.accounts ?? [];
+      setDemo(accounts);
+      if (accounts[0]) { setEmail(accounts[0].email); setPassword(accounts[0].password); }
+    }).catch(() => undefined);
+  }, [setupRequired]);
+  const pickDemo = (value: string) => { const account = demo.find((a) => a.email === value); setEmail(account?.email ?? ''); setPassword(account?.password ?? ''); };
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault(); setError(''); setBusy(true);
+    try {
+      const response = await fetch(setupRequired ? '/api/auth/setup' : '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(setupRequired ? { name, email, password } : { email, password }) });
+      const payload = await response.json() as { user?: AuthUser; error?: string };
+      if (!response.ok || !payload.user) throw new Error(payload.error || 'เข้าสู่ระบบไม่สำเร็จ');
+      onSignedIn(payload.user);
+    } catch (submitError) { setError(submitError instanceof Error ? submitError.message : 'เข้าสู่ระบบไม่สำเร็จ'); } finally { setBusy(false); }
+  };
+  return <div className="login-page"><div className="card login-card"><div className="login-logo"><Logo compact /><div><div className="brand-name">Fruit Defect Detection</div><span className="brand-sub">ENGINE BY CIRA CORE</span></div></div>
+    <h1>{setupRequired ? 'ตั้งค่าบัญชี Admin แรก' : 'ยินดีต้อนรับกลับ'}</h1>
+    <p>{setupRequired ? 'ยังไม่มีผู้ใช้ในระบบ บัญชีนี้จะเป็น Admin และเพิ่มผู้ใช้คนอื่นได้ในหน้า Users' : 'เข้าสู่ระบบเพื่อดูสถานะไลน์คัดแยกผลไม้'}</p>
+    <form className="login-form" onSubmit={(e) => void submit(e)}>
+      {demo.length > 0 && <div><label className="form-label">บัญชี demo</label><select className="select" style={{ width: '100%' }} value={demo.some((a) => a.email === email) ? email : ''} onChange={(e) => pickDemo(e.target.value)}>{demo.map((a) => <option key={a.email} value={a.email}>{a.label} · {a.email}</option>)}<option value="">กรอกเอง</option></select></div>}
+      {setupRequired && <div><label className="form-label">ชื่อที่แสดง</label><input className="input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" required /></div>}
+      <div><label className="form-label">อีเมล</label><input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required /></div>
+      <div><label className="form-label">รหัสผ่าน{setupRequired ? ' (อย่างน้อย 8 ตัวอักษร)' : ''}</label><input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={setupRequired ? 'new-password' : 'current-password'} required minLength={setupRequired ? 8 : undefined} /></div>
+      {error && <div style={{ color: '#c4564d', fontSize: 11 }}>{error}</div>}
+      <button className="btn btn-primary" type="submit" disabled={busy}><LogIn size={14} /> {busy ? 'กำลังตรวจสอบ...' : setupRequired ? 'สร้างบัญชีและเข้าสู่ระบบ' : 'เข้าสู่ Control Room'}</button>
+    </form>
+    <div className="login-demo">{setupRequired ? 'หน้านี้แสดงเฉพาะตอนยังไม่มีผู้ใช้' : 'ลืมรหัสผ่าน: ให้ Admin ตั้งรหัสใหม่ในหน้า Users'}</div></div></div>;
 }
 
-function NotFoundView() { return <div className="login-page"><div className="card login-card"><div className="login-logo"><Logo compact /><div><div className="brand-name">CIRA CORE</div><span className="brand-sub">EDGE CONTROL ROOM</span></div></div><h1>ไม่พบหน้านี้</h1><p>เส้นทางที่เรียกไม่มีอยู่ใน Control Room แบบจำลอง</p><a className="btn btn-primary" href="/simulate"><Activity size={14} /> กลับไป Simulate</a></div></div>; }
+function NotFoundView() { return <div className="login-page"><div className="card login-card"><div className="login-logo"><Logo compact /><div><div className="brand-name">CIRA CORE</div><span className="brand-sub">EDGE CONTROL ROOM</span></div></div><h1>ไม่พบหน้านี้</h1><p>เส้นทางที่เรียกไม่มีอยู่ใน Dashboard</p><a className="btn btn-primary" href="/simulate"><Activity size={14} /> กลับไปหน้า Live</a></div></div>; }
 
 export default function DashboardPage() {
-  const pathname = usePathname(); const [running, setRunning] = useState(false); const [online, setOnline] = useState(true); const [mobileOpen, setMobileOpen] = useState(false); const [profiles, setProfiles] = useState<FruitProfile[]>(fruitProfiles);
-  useEffect(() => { try { const storedOnline = window.localStorage.getItem('cira-core-online'); if (storedOnline !== null) setOnline(storedOnline === 'true'); const storedProfiles = window.localStorage.getItem('cira-core-profiles'); if (storedProfiles) setProfiles(JSON.parse(storedProfiles) as FruitProfile[]); } catch { /* mock persistence can safely fall back to defaults */ } }, []);
-  useEffect(() => { window.localStorage.setItem('cira-core-online', String(online)); }, [online]);
-  useEffect(() => { window.localStorage.setItem('cira-core-profiles', JSON.stringify(profiles)); }, [profiles]);
-  const path = pathname === '/' ? 'simulate' : pathname.split('/')[1] || 'simulate'; const known = navItems.some((item) => item.key === path) || path === 'login' || pathname === '/'; const page = (navItems.some((item) => item.key === path) ? path : path === 'login' ? 'login' : 'simulate') as PageKey;
+  const pathname = usePathname(); const router = useRouter(); const [mobileOpen, setMobileOpen] = useState(false);
+  const [auth, setAuth] = useState<{ checked: boolean; user: AuthUser | null; setupRequired: boolean; error: string }>({ checked: false, user: null, setupRequired: false, error: '' });
+  const checkAuth = async () => {
+    try {
+      const response = await fetch('/api/auth/me', { cache: 'no-store' });
+      const payload = await response.json() as { user?: AuthUser | null; setup_required?: boolean; error?: string };
+      if (response.status === 503) throw new Error(payload.error || 'ฐานข้อมูลไม่พร้อม');
+      setAuth({ checked: true, user: payload.user ?? null, setupRequired: Boolean(payload.setup_required), error: '' });
+    } catch (authError) { setAuth({ checked: true, user: null, setupRequired: false, error: authError instanceof Error ? authError.message : 'ตรวจสอบการเข้าสู่ระบบไม่สำเร็จ' }); }
+  };
+  useEffect(() => { void checkAuth(); }, []);
+  // Session expired / revoked while a page is open: any API answering 401 sends the browser to login.
+  useEffect(() => {
+    const original = window.fetch;
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      const response = await original(...args);
+      const url = typeof args[0] === 'string' ? args[0] : args[0] instanceof URL ? args[0].pathname : args[0].url;
+      if (response.status === 401 && url.startsWith('/api/') && !url.startsWith('/api/auth/')) setAuth((current) => current.user ? { ...current, user: null } : current);
+      return response;
+    };
+    return () => { window.fetch = original; };
+  }, []);
+  const logout = async () => { await fetch('/api/auth/logout', { method: 'POST' }).catch(() => undefined); setAuth((current) => ({ ...current, user: null })); router.replace('/login'); };
+
+  const path = pathname === '/' ? 'simulate' : pathname.split('/')[1] || 'simulate';
+  const known = navItems.some((item) => item.key === path) || path === 'login' || pathname === '/';
+  const page = (navItems.some((item) => item.key === path) ? path : path === 'login' ? 'login' : 'simulate') as PageKey;
+  useEffect(() => {
+    if (!auth.checked) return;
+    if (!auth.user && page !== 'login') router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+    if (auth.user && page === 'login') {
+      const next = new URLSearchParams(window.location.search).get('next');
+      router.replace(next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/login') ? next : '/simulate');
+    }
+  }, [auth.checked, auth.user, page, pathname, router]);
+
   if (!known) return <NotFoundView />;
-  if (page === 'login') return <LoginView />;
-  return <Shell current={page} online={online} setOnline={setOnline} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen}>{<main className="page-wrap">{page === 'simulate' && <SimulateView online={online} setOnline={setOnline} setRunning={setRunning} />}{page === 'logs' && <LogsView />}{page === 'alerts' && <AlertsView />}{page === 'system' && <SystemView />}{page === 'profiles' && <ProfilesView profiles={profiles} setProfiles={setProfiles} />}{page === 'users' && <UsersView />}{page === 'myteam' && <MyTeamView />}</main>}</Shell>;
+  if (!auth.checked) return <div className="login-page"><div className="empty">กำลังตรวจสอบการเข้าสู่ระบบ...</div></div>;
+  if (auth.error) return <div className="login-page"><div className="card login-card"><h1>เชื่อมต่อระบบไม่ได้</h1><p>{auth.error}</p><button type="button" className="btn btn-primary" onClick={() => void checkAuth()}><RefreshCcw size={14} /> ลองใหม่</button></div></div>;
+  if (!auth.user) return page === 'login' ? <LoginView setupRequired={auth.setupRequired} onSignedIn={(user) => setAuth({ checked: true, user, setupRequired: false, error: '' })} /> : <div className="login-page"><div className="empty">กำลังไปหน้าเข้าสู่ระบบ...</div></div>;
+  if (page === 'login') return <div className="login-page"><div className="empty">เข้าสู่ระบบแล้ว...</div></div>;
+  return <AuthContext.Provider value={{ user: auth.user, logout: () => void logout() }}><Shell current={page} mobileOpen={mobileOpen} setMobileOpen={setMobileOpen}><main className="page-wrap">{page === 'simulate' && <SimulateView />}{page === 'logs' && <LogsView />}{page === 'runs' && <RunsView />}{page === 'alerts' && <AlertsView />}{page === 'system' && <SystemView />}{page === 'profiles' && <ProfilesView />}{page === 'users' && <UsersView />}{page === 'myteam' && <MyTeamView />}</main></Shell></AuthContext.Provider>;
 }

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 import { bucketFor, buildWhere, parseFilters } from '@/lib/logQuery';
 
 export const dynamic = 'force-dynamic';
@@ -26,6 +27,8 @@ async function loadOptions() {
 const ORIGIN = `'2000-01-01 00:00:00+07'::timestamptz`;
 
 export async function GET(request: NextRequest) {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   const params = request.nextUrl.searchParams;
   const filters = parseFilters(params);
   const { sql: where, params: values } = buildWhere(filters);

@@ -1,13 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 const ALLOWED_WINDOWS = [5, 15, 60, 480, 1440];
 
 export async function GET(request: NextRequest) {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   const requested = Number(request.nextUrl.searchParams.get('window'));
   const windowMin = ALLOWED_WINDOWS.includes(requested) ? requested : 15;
+
+  // ?lite=1: only what the top bar / sidebar show on every page (machine state, events per minute,
+  // current model) -- 3 small queries instead of the 7 the Live page needs.
+  if (request.nextUrl.searchParams.get('lite') === '1') {
+    try {
+      const [device, rate, model] = await Promise.all([
+        pool.query(`SELECT device_id, state FROM device_status_live ORDER BY last_seen DESC LIMIT 1`),
+        pool.query(`SELECT count(*)::int AS n FROM fruit_events WHERE ts >= now() - interval '60 seconds'`),
+        pool.query(`SELECT model_version FROM fruit_events ORDER BY ts DESC LIMIT 1`),
+      ]);
+      const d = device.rows[0];
+      return NextResponse.json({
+        device: d ? { device_id: d.device_id, state: d.state } : null,
+        events_last_minute: rate.rows[0]?.n ?? 0,
+        recent: model.rows.map((row) => ({ model_version: row.model_version })),
+      });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : 'Live query failed' }, { status: 503 });
+    }
+  }
 
   try {
     const [device, last, byFruit, rate, recent, byDefect, latency] = await Promise.all([

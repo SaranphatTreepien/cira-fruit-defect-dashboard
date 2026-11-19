@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -7,6 +8,8 @@ export const dynamic = 'force-dynamic';
 // GET /api/alerts/feed            -> latest id + counts (no items, so old alerts do not pop up)
 // GET /api/alerts/feed?after=123  -> alerts with id > 123 (oldest first, max 20)
 export async function GET(request: NextRequest) {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   const after = Number(request.nextUrl.searchParams.get('after'));
   try {
     const [counts, items] = await Promise.all([

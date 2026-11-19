@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 import { buildWhere, parseFilters } from '@/lib/logQuery';
 
 export const dynamic = 'force-dynamic';
@@ -17,6 +18,8 @@ function csvCell(value: unknown): string {
 }
 
 export async function GET(request: NextRequest) {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   const filters = parseFilters(request.nextUrl.searchParams);
   const { sql: where, params } = buildWhere(filters);
   try {

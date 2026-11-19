@@ -10,6 +10,9 @@ Sources it watches:
   * Database      connection errors; the outage is recorded as one alert when the DB is back.
   * Writer        scripts/mqtt_to_db.py / mqtt_status.py: MQTT messages arrive but DB is not updated.
   * Data rules    settings.alert_rules: defect rate, no events while running, ingest latency.
+  * Model         model_version in incoming events changes (models are switched by hand in CIRA CORE).
+  * Daily report  once a day at daily_report.hour:minute (Bangkok) a summary of today is written as an
+                  info alert (rule daily_report) and sent to Telegram whatever telegram.min_level is.
   * Itself        watcher start / stop.
 
 Problems open ONE alert per condition (dedup_key) and are resolved when they clear; recoveries are
@@ -85,7 +88,11 @@ DEFAULT_RULES = {
     "internet": {"enabled": True},
     "writer": {"enabled": True},
     "telegram": {"enabled": True, "min_level": "info"},
+    "model_change": {"enabled": True},
+    "daily_report": {"enabled": True, "hour": 18, "minute": 0},
 }
+BKK = timezone(timedelta(hours=7))
+ALWAYS_SEND_RULES = {"daily_report"}  # sent to Telegram even below telegram.min_level
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 NOTIFY_EVERY_SEC = 4
@@ -323,7 +330,7 @@ class TelegramNotifier:
         cur.execute("""SELECT id, ts, level, title, detail, device_id, resolved_at, rule, notify_attempts
                        FROM alerts WHERE notify_status = 'pending' ORDER BY id LIMIT 10""")
         for alert_id, ts, level, title, detail, device_id, resolved_at, rule, attempts in cur.fetchall():
-            if LEVEL_RANK.get(level, 0) < min_rank:
+            if LEVEL_RANK.get(level, 0) < min_rank and rule not in ALWAYS_SEND_RULES:
                 cur.execute("UPDATE alerts SET notify_status = 'skipped', notify_error = 'below min_level' WHERE id = %s", (alert_id,))
                 continue
             ok, retry_after, error = telegram_send(format_alert(ts, level, title, detail, device_id, resolved_at, rule))
@@ -338,6 +345,51 @@ class TelegramNotifier:
             log.warning("TELEGRAM failed #%s (attempt %s): %s", alert_id, attempts + 1, error)
             self.pause_until = time.time() + max(retry_after, 5 * (attempts + 1))
             break
+
+
+def build_daily_report(cur, now):
+    """Today (Bangkok, 00:00 until now): production, defect rate, runs, run time, alerts."""
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    cur.execute("""SELECT count(*), count(*) FILTER (WHERE external_result = 'defect'),
+                          avg(CASE WHEN confidence <= 1 THEN confidence * 100 ELSE confidence END)
+                   FROM fruit_events WHERE ts >= %s AND ts < %s""", (start, now))
+    total, defect, conf = cur.fetchone()
+    cur.execute("""SELECT COALESCE(fruit_type, 'unknown'), count(*), count(*) FILTER (WHERE external_result = 'defect')
+                   FROM fruit_events WHERE ts >= %s AND ts < %s GROUP BY 1 ORDER BY 2 DESC""", (start, now))
+    fruits = cur.fetchall()
+    cur.execute("""SELECT defect_type, count(*) FROM fruit_events
+                   WHERE ts >= %s AND ts < %s AND external_result = 'defect' AND defect_type IS NOT NULL
+                   GROUP BY 1 ORDER BY 2 DESC LIMIT 3""", (start, now))
+    defects = cur.fetchall()
+    cur.execute("""SELECT DISTINCT COALESCE(model_version, raw->>'model_version') FROM fruit_events
+                   WHERE ts >= %s AND ts < %s""", (start, now))
+    models = [r[0] for r in cur.fetchall() if r[0]]
+    cur.execute("""WITH s AS (SELECT device_id, ts, to_state IN ('playing', 'started') AS up,
+                                  lag(to_state IN ('playing', 'started')) OVER (PARTITION BY device_id ORDER BY ts) AS prev_up,
+                                  COALESCE(lead(ts) OVER (PARTITION BY device_id ORDER BY ts), now()) AS next_ts
+                           FROM device_state_log)
+                   SELECT count(*) FILTER (WHERE up AND prev_up IS DISTINCT FROM true AND ts >= %s),
+                          COALESCE(sum(extract(epoch FROM LEAST(next_ts, %s) - GREATEST(ts, %s)))
+                                   FILTER (WHERE up AND next_ts > %s AND ts < %s), 0)
+                   FROM s""", (start, now, start, start, now))
+    runs, run_sec = cur.fetchone()
+    cur.execute("""SELECT count(*) FILTER (WHERE level = 'critical'), count(*) FILTER (WHERE level = 'warning')
+                   FROM alerts WHERE ts >= %s AND ts < %s AND level <> 'info'""", (start, now))
+    crit, warn = cur.fetchone()
+    rate = (defect / total * 100) if total else 0.0
+    lines = [f"คัดแล้ว {total:,} ผล · ดี {total - defect:,} · เสีย {defect:,} (defect {rate:.1f}%)" if total else "วันนี้ยังไม่มีผลไม้ผ่านกล้อง"]
+    if fruits and total:
+        lines.append("ตามชนิด: " + ", ".join(f"{fr} {n:,} (เสีย {d / n * 100:.0f}%)" for fr, n, d in fruits))
+    if defects:
+        lines.append("ตำหนิที่พบมาก: " + ", ".join(f"{d} {n:,}" for d, n in defects))
+    if conf is not None:
+        lines.append(f"confidence เฉลี่ย {float(conf):.1f}% · โมเดล {', '.join(models) or '-'}")
+    lines.append(f"เครื่องทำงาน {fmt_duration(float(run_sec))} ใน {runs} รอบ · alert วิกฤต {crit} เตือน {warn}")
+    lines.append(f"ช่วง 00:00–{now.strftime('%H:%M')} · ดูรายละเอียด/CSV ที่หน้า Alert & Reports และ Runs & Models")
+    title = f"รายงานประจำวัน {now.strftime('%d/%m/%Y')}"
+    data = {"total": total, "defect": defect, "defect_rate": round(rate, 2), "runs": runs, "run_sec": round(float(run_sec)),
+            "critical": crit, "warning": warn, "models": models}
+    return title, "\n".join(lines), data
 
 
 def load_rules(cur):
@@ -504,6 +556,59 @@ class Watcher:
         elif not la.get("enabled", True) or (n >= 5 and avg is not None):
             self.out.resolve("latency_high")
 
+    # --- model switched in CIRA CORE (last value kept in settings so a restart doesn't miss it)
+    def check_model(self, cur):
+        cur.execute("SELECT COALESCE(model_version, raw->>'model_version'), ts FROM fruit_events ORDER BY ts DESC LIMIT 1")
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return
+        model, ts = row
+        cur.execute("SELECT value FROM settings WHERE key = 'last_model_version'")
+        prev_row = cur.fetchone()
+        prev = prev_row[0].get("model_version") if prev_row and isinstance(prev_row[0], dict) else None
+        if prev == model:
+            return
+        cur.execute("""INSERT INTO settings (key, value, updated_at) VALUES ('last_model_version', %s, now())
+                       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()""",
+                    (Json({"model_version": model, "since": ts.isoformat()}),))
+        if prev is None or not self.rules.get("model_change", {}).get("enabled", True):
+            log.info("MODEL now %s (previous %s)", model, prev)
+            return
+        cur.execute("""SELECT count(*), count(*) FILTER (WHERE external_result = 'defect')
+                       FROM fruit_events WHERE COALESCE(model_version, raw->>'model_version') = %s
+                       AND ts >= now() - interval '24 hours'""", (prev,))
+        n, d = cur.fetchone()
+        before = f" · {prev} ใน 24 ชม.: {n} ผล defect {d / n * 100:.1f}%" if n else ""
+        self.out.info("model_changed", f"โมเดลเปลี่ยน: {prev} → {model}",
+                      f"เห็น {model} ใน event เวลา {ts.astimezone(BKK).strftime('%H:%M:%S')}{before} · ดูเทียบได้ที่หน้า Runs & Models",
+                      f"model_changed:{model}:{int(ts.timestamp())}", level="warning",
+                      data={"from": prev, "to": model})
+
+    # --- daily summary, once per Bangkok day after the configured time
+    def check_daily_report(self, cur):
+        conf = self.rules.get("daily_report", {})
+        if not conf.get("enabled", True):
+            return
+        now = datetime.now(BKK)
+        due = now.replace(hour=int(conf.get("hour", 18)) % 24, minute=int(conf.get("minute", 0)) % 60, second=0, microsecond=0)
+        if now < due:
+            return
+        day = now.strftime("%Y-%m-%d")
+        cur.execute("SELECT value FROM settings WHERE key = 'daily_report_last'")
+        row = cur.fetchone()
+        if row and isinstance(row[0], dict) and row[0].get("day") == day:
+            return
+        if row is None and now - due > timedelta(hours=3):
+            # first run long after the time: start tomorrow instead of sending a late report now
+            cur.execute("""INSERT INTO settings (key, value, updated_at) VALUES ('daily_report_last', %s, now())
+                           ON CONFLICT (key) DO NOTHING""", (Json({"day": day, "skipped": True}),))
+            return
+        title, detail, data = build_daily_report(cur, now)
+        cur.execute("""INSERT INTO settings (key, value, updated_at) VALUES ('daily_report_last', %s, now())
+                       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()""",
+                    (Json({"day": day}),))
+        self.out.info("daily_report", title, detail, f"daily_report:{day}", data=data)
+
     # --- database outage bookkeeping
     def on_db_back(self):
         if self.db_down_since is None:
@@ -581,6 +686,8 @@ class Watcher:
                         self.check_writer(cur)
                         if time.time() - self.last_rule_check >= RULE_EVERY_SEC:
                             self.check_rules(cur)
+                            self.check_model(cur)
+                            self.check_daily_report(cur)
                             self.last_rule_check = time.time()
                         self.out.flush(cur)
                         self.tg.process(cur, self.rules, self.net.get("internet"))

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -37,6 +38,8 @@ async function gather(scope: 'today' | 'week') {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   const key = process.env.GEMINI_API_KEY || process.env.Gemeni_api_key;
   if (!key) return NextResponse.json({ error: 'ยังไม่ได้ตั้ง Gemeni_api_key ใน .env' }, { status: 503 });
   let scope: 'today' | 'week' = 'today';

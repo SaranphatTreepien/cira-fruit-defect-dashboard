@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,9 +14,13 @@ const SCHEMA: Record<string, Record<string, [number, number] | 'bool' | 'level'>
   internet: { enabled: 'bool' },
   writer: { enabled: 'bool' },
   telegram: { enabled: 'bool', min_level: 'level' },
+  model_change: { enabled: 'bool' },
+  daily_report: { enabled: 'bool', hour: [0, 23], minute: [0, 59] },
 };
 
 export async function GET() {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   try {
     const result = await pool.query(`SELECT value, updated_at FROM settings WHERE key = 'alert_rules'`);
     return NextResponse.json({ rules: result.rows[0]?.value ?? null, updated_at: result.rows[0]?.updated_at ?? null });
@@ -25,6 +30,8 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
+  const auth = await requireUser('admin');
+  if (auth instanceof NextResponse) return auth;
   let body: unknown;
   try { body = await request.json(); } catch { return NextResponse.json({ error: 'invalid JSON' }, { status: 400 }); }
   const input = (body as { rules?: Record<string, Record<string, unknown>> })?.rules;

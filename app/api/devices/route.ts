@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 
 export async function GET() {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   try {
     const result = await pool.query(`
       SELECT device_id, source_type, state, last_seen, age_sec

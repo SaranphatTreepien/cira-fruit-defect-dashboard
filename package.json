@@ -11,7 +11,10 @@
     "watcher": "python scripts/alert_watcher.py",
     "test:telegram": "python scripts/alert_watcher.py --test-telegram",
     "typecheck": "tsc --noEmit",
-    "bot": "python scripts/telegram_bot.py"
+    "bot": "python scripts/telegram_bot.py",
+    "writer": "python scripts/mqtt_to_db.py",
+    "sim": "python scripts/mqtt_sim.py",
+    "failure-test": "python scripts/failure_test.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

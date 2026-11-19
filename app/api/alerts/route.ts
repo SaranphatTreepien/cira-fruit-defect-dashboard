@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -7,6 +8,8 @@ const RANGES: Record<string, string> = { '24h': '24 hours', '7d': '7 days', '30d
 
 // GET: alert inbox + counts + machine on/off history + watcher heartbeat.
 export async function GET(request: NextRequest) {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   const params = request.nextUrl.searchParams;
   const range = RANGES[params.get('range') ?? ''] ?? RANGES['7d'];
   const status = params.get('status') ?? 'all'; // open | new | resolved | all
@@ -54,20 +57,22 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// POST { action: 'ack', ids: number[] } or { action: 'ack_all' } -- acknowledge alerts.
+// POST { action: 'ack', ids: number[] } or { action: 'ack_all' } -- acknowledge alerts as the signed-in user.
 export async function POST(request: NextRequest) {
-  let body: { action?: string; ids?: unknown; by?: unknown };
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
+  let body: { action?: string; ids?: unknown };
   try { body = await request.json(); } catch { return NextResponse.json({ error: 'invalid JSON' }, { status: 400 }); }
-  const by = typeof body.by === 'string' && body.by.trim() ? body.by.trim().slice(0, 60) : 'dashboard';
+  const by = auth.name;
   try {
     if (body.action === 'ack_all') {
-      const result = await pool.query(`UPDATE alerts SET status = 'ack', acked_at = now(), acked_by = $1 WHERE status = 'new'`, [by]);
+      const result = await pool.query(`UPDATE alerts SET status = 'ack', acked_at = now(), acked_by = $1, acked_by_user = $2 WHERE status = 'new'`, [by, auth.id]);
       return NextResponse.json({ updated: result.rowCount });
     }
     if (body.action === 'ack' && Array.isArray(body.ids)) {
       const ids = body.ids.map(Number).filter((id) => Number.isInteger(id) && id > 0).slice(0, 500);
       if (!ids.length) return NextResponse.json({ error: 'no ids' }, { status: 400 });
-      const result = await pool.query(`UPDATE alerts SET status = 'ack', acked_at = now(), acked_by = $2 WHERE id = ANY($1::bigint[]) AND status = 'new'`, [ids, by]);
+      const result = await pool.query(`UPDATE alerts SET status = 'ack', acked_at = now(), acked_by = $2, acked_by_user = $3 WHERE id = ANY($1::bigint[]) AND status = 'new'`, [ids, by, auth.id]);
       return NextResponse.json({ updated: result.rowCount });
     }
     return NextResponse.json({ error: 'unknown action' }, { status: 400 });

@@ -1,6 +1,7 @@
 import net from 'node:net';
 import { NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 
 type HealthState = 'online' | 'offline' | 'unknown';
 type HealthSnapshot = {
@@ -83,6 +84,8 @@ async function internetCached(): Promise<boolean> {
 }
 
 export async function GET() {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   if (cached && Date.now() - cached.at < SNAPSHOT_TTL_MS) return NextResponse.json(cached.body);
   inflight ??= check().finally(() => { inflight = null; });
   const body = await inflight;

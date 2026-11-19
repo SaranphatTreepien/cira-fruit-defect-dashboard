@@ -534,3 +534,4 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
   .app-shell.sidebar-collapsed .nav-item { justify-content: center; padding: 12px; }
   .app-shell.sidebar-collapsed .nav-item:hover { transform: none; }
 }
+.rule-list.readonly { pointer-events: none; opacity: .72; }

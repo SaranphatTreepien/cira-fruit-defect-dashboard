@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { pool } from '@/db/pool';
+import { requireUser } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
 // Daily summary (Bangkok days) for the last N days: production, defect rate, confidence,
 // machine running time (from device_state_log) and alert counts.
 export async function GET(request: NextRequest) {
+  const auth = await requireUser();
+  if (auth instanceof NextResponse) return auth;
   const days = Math.min(31, Math.max(1, Number(request.nextUrl.searchParams.get('days')) || 7));
   try {
     const result = await pool.query(

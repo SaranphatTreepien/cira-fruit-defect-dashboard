@@ -13,10 +13,15 @@ mqtt_to_db.py v3  --  MQTT (Mosquitto) -> PostgreSQL local, แบบ batch + �
   5. ข้อความเสีย (JSON พัง/ไม่มี event_id ฯลฯ) -> ack แล้วแยกทิ้ง + log (ไม่ให้วนค้าง)
   6. สถานะอุปกรณ์ (topic cira/fruit/status/#): เขียนลง device_status ทันที ไม่ผ่าน batch
      ใช้ connection แยกจาก event (ไม่ปนกับ transaction ของ batch)
+  7. กันนับผลไม้ซ้ำ: event ที่มี track_id เดียวกันใน run + camera_view เดียวกัน (event_id ต่างกัน)
+     ภายใน DEDUP_TRACK_SEC วินาที ถือเป็นผลไม้ลูกเดิม -> เก็บอันแรก ทิ้งอันหลัง (ack ให้ broker)
+     สรุปจำนวนที่ทิ้งลง system_logs (DEDUP_TRACK) ทุก 30 วินาที · DEDUP_TRACK_SEC=0 ปิด
+  8. model_version ที่ยังไม่มีในตาราง models -> ลงทะเบียนให้อัตโนมัติ (เปลี่ยนโมเดลใน CORE
+     แล้วสถิติแยกตามโมเดลยังใช้ได้ ไม่กลายเป็น NULL)
 
 ตั้งค่าผ่าน .env.local หรือ environment variable (ทุกตัวมีค่าเริ่มต้น ยกเว้น DATABASE_URL)
   DATABASE_URL, MQTT_HOST, MQTT_PORT, MQTT_TOPIC, MQTT_STATUS_TOPIC, MQTT_CLIENT_ID,
-  BATCH_SIZE, FLUSH_SEC, LOG_LEVEL, LOG_EVENTS (1/0), LOG_DIR
+  BATCH_SIZE, FLUSH_SEC, LOG_LEVEL, LOG_EVENTS (1/0), LOG_DIR, DEDUP_TRACK_SEC
 """
 
 import json
@@ -60,7 +65,9 @@ FLUSH_SEC = float(os.environ.get("FLUSH_SEC", "1.0"))
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_EVENTS = os.environ.get("LOG_EVENTS", "1") == "1"
 LOG_DIR = os.environ.get("LOG_DIR", os.path.join(ROOT, "logs"))
+DEDUP_TRACK_SEC = float(os.environ.get("DEDUP_TRACK_SEC", "30"))
 STATS_EVERY = 30  # วินาที
+MODEL_SOURCES = ("mock", "quick", "team")  # CHECK constraint ของ models.model_source
 
 # ---------------------------------------------------------------- logging
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -90,8 +97,10 @@ syslog_q = []  # ข้อความเสียที่รอเขียน
 stopping = False
 _conn = None  # connection ของ event (main thread)
 _status_conn = None  # connection ของสถานะ (MQTT callback thread)
-stats = {"recv": 0, "inserted": 0, "dup": 0, "bad": 0, "batches": 0, "status": 0}
-_last_stats = (0, 0, 0, 0, 0, 0)
+stats = {"recv": 0, "inserted": 0, "dup": 0, "bad": 0, "batches": 0, "status": 0, "dedup": 0}
+_last_stats = (0, 0, 0, 0, 0, 0, 0)
+track_seen = {}  # (run, camera_view, track_id) -> (event_id, monotonic time) สำหรับกันนับซ้ำ
+dedup_pending = 0  # จำนวนที่ทิ้งไปแล้วแต่ยังไม่ได้สรุปลง system_logs
 _status_err_ts = 0.0  # กัน log STATUS_ERR รัว
 
 INSERT_SQL = (
@@ -188,11 +197,27 @@ def build_row(ev, lk):
     return row, notes
 
 
+def register_models(cur, evs, model_ok):
+    """model_version ใหม่ที่ CORE ส่งมา -> เพิ่มในตาราง models (ไม่งั้น FK ทำให้กลายเป็น NULL)"""
+    for ev in evs:
+        v = ev.get("model_version")
+        if not isinstance(v, str) or not v.strip() or v in model_ok or len(v) > 100:
+            continue
+        src = ev.get("model_source") if ev.get("model_source") in MODEL_SOURCES else "team"
+        cur.execute(
+            "INSERT INTO models (model_version, model_source) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (v, src),
+        )
+        model_ok.add(v)
+        log.info("MODEL_REGISTERED model_version=%s source=%s", v, src)
+
+
 def write_batch(conn, evs):
     """INSERT ทั้งชุดใน transaction เดียว -> (set ของ event_id ที่เข้าจริง, notes)"""
     with conn:
         with conn.cursor() as cur:
             lk = load_lookups(cur)
+            register_models(cur, evs, lk[2])
             rows, notes = [], []
             for ev in evs:
                 r, n = build_row(ev, lk)
@@ -249,12 +274,50 @@ def drain_syslog():
             with conn.cursor() as cur:
                 for m in list(syslog_q):
                     cur.execute(
-                        "INSERT INTO system_logs (level, source, message) VALUES ('warning','mqtt_to_db',%s)",
-                        (m,),
+                        "INSERT INTO system_logs (level, source, message) VALUES (%s,'mqtt_to_db',%s)",
+                        ("info" if m.startswith("DEDUP_TRACK") else "warning", m),
                     )
         syslog_q.clear()
     except psycopg2.Error:
         drop_conn()
+
+
+# ---------------------------------------------------------------- dedup
+def split_dupes(items):
+    """แยก event ที่เป็นผลไม้ลูกเดิม (run + camera_view + track_id ซ้ำ, event_id ต่าง) ออกจากชุด"""
+    global dedup_pending
+    if DEDUP_TRACK_SEC <= 0:
+        return items, []
+    now = time.monotonic()
+    if len(track_seen) > 20000:
+        for k in [k for k, (_, t) in track_seen.items() if now - t > DEDUP_TRACK_SEC]:
+            del track_seen[k]
+    keep, drop = [], []
+    for item in items:
+        ev = item[0]
+        tid = ev.get("track_id")
+        if tid is None:
+            keep.append(item)
+            continue
+        key = (str(ev.get("run") or ""), str(ev.get("camera_view") or ""), str(tid))
+        prev = track_seen.get(key)
+        if prev and prev[0] != ev["event_id"] and now - prev[1] < DEDUP_TRACK_SEC:
+            drop.append(item)
+            log.info("DEDUP_TRACK drop id=%s same fruit as id=%s (track_id=%s run=%s)", ev["event_id"], prev[0], tid, key[0] or "-")
+            continue
+        if not prev or prev[0] != ev["event_id"]:
+            track_seen[key] = (ev["event_id"], now)
+        keep.append(item)
+    stats["dedup"] += len(drop)
+    dedup_pending += len(drop)
+    return keep, drop
+
+
+def log_dedup_summary():
+    global dedup_pending
+    if dedup_pending and len(syslog_q) < 1000:
+        syslog_q.append(f"DEDUP_TRACK dropped={dedup_pending} window_sec={DEDUP_TRACK_SEC:g} (ผลไม้ลูกเดิมส่งซ้ำ: run + track_id เดียวกัน)")
+        dedup_pending = 0
 
 
 # ---------------------------------------------------------------- flush
@@ -272,6 +335,11 @@ def ack_items(client, items):
 
 def flush(client, items, final=False):
     """เขียนชุดข้อความลง DB แล้ว ack -- วนลองใหม่จนสำเร็จ (ยกเว้นตอนปิดโปรแกรม)"""
+    keep, dropped = split_dupes(items)
+    if not keep:
+        ack_items(client, dropped)
+        return
+    items = keep
     evs = [i[0] for i in items]
     backoff = 1.0
     while True:
@@ -329,7 +397,8 @@ def flush(client, items, final=False):
                         ev.get("model_source"),
                     )
 
-            acked, skipped = ack_items(client, items)
+            # ack ของตัวที่ถูกทิ้ง (ซ้ำ) ส่งหลังเขียนชุดนี้สำเร็จ: ข้อความ MQTT หนึ่งอาจมีหลาย event
+            acked, skipped = ack_items(client, items + dropped)
             n_new = len(inserted)
             n_dup = len(evs) - n_new - len(bad)
             stats["inserted"] += n_new
@@ -441,12 +510,13 @@ def log_stats(force=False):
         stats["bad"],
         stats["batches"],
         stats["status"],
+        stats["dedup"],
     )
     if force or cur != _last_stats:
         with lock:
             pending = len(buf)
         log.info(
-            "STATS recv=%d inserted=%d dup=%d bad=%d batches=%d status=%d pending=%d",
+            "STATS recv=%d inserted=%d dup=%d bad=%d batches=%d status=%d dedup=%d pending=%d",
             *cur,
             pending,
         )
@@ -479,11 +549,12 @@ def stop_status_proc():
 def main():
     global stopping
     log.info(
-        "START v3 batch_size=%d flush_sec=%.1f log_dir=%s log_events=%s",
+        "START v3 batch_size=%d flush_sec=%.1f log_dir=%s log_events=%s dedup_track_sec=%g",
         BATCH_SIZE,
         FLUSH_SEC,
         LOG_DIR,
         LOG_EVENTS,
+        DEDUP_TRACK_SEC,
     )
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
@@ -517,6 +588,7 @@ def main():
                 ensure_status_proc()
                 last_chk = time.monotonic()
             if time.monotonic() - last_stats_t >= STATS_EVERY:
+                log_dedup_summary()
                 log_stats()
                 last_stats_t = time.monotonic()
     except KeyboardInterrupt:
@@ -527,6 +599,8 @@ def main():
             buf.clear()
         if items:
             flush(client, items, final=True)
+        log_dedup_summary()
+        drain_syslog()
         log_stats(force=True)
         client.loop_stop()
         client.disconnect()
