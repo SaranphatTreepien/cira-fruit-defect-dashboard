@@ -4,6 +4,7 @@ out
 *.tsbuildinfo
 .env
 .env.*
+!.env.example
 .DS_Store
 
 # runtime logs
