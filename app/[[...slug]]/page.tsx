@@ -228,14 +228,16 @@ type LiveData = {
   batches: LiveBatch[];
 };
 // One DB write by mqtt_to_db.py: all its rows share created_at.
-type LiveBatch = { created_at: string | null; n: number; first_ts: string | null; last_ts: string | null };
+type LiveBatch = { created_at: string | null; n: number; defect: number; first_ts: string | null; last_ts: string | null };
 type LiveHealth = { db: string; mqtt: string; internet: string };
-type LiveToken = { id: string; kind: 'good' | 'defect'; fruit: string | null; trackId: string; conf: string };
+// One pile per DB batch on the belt. The lead pile carries the whole batch to the fork, then goes on as the
+// good pile; the defect pile appears at the fork. A lead with no good fruit (carrier) fades out there.
+type LiveToken = { id: string; batch: string; label: string; kind: 'good' | 'defect'; lead: boolean; carrier: boolean; count: number; total: number; good: number; defect: number; fruit: string | null };
 
 const liveWindows = [{ v: 5, label: '5 นาที' }, { v: 15, label: '15 นาที' }, { v: 60, label: '1 ชม.' }, { v: 480, label: '8 ชม.' }, { v: 1440, label: '24 ชม.' }];
 const fruitEmoji: Record<string, string> = { orange: '🍊', apple: '🍎', banana: '🍌' };
 const LIVE_QUEUE_MAX = 12;
-const LIVE_SPAWN_GAP_MS = 750;
+const LIVE_SPAWN_GAP_MS = 450; // between two batch piles
 const LIVE_TRAVEL_MS = 3400; // must match .lv-token animation-duration in globals.css
 const liveTime = (value: string | null) => value ? new Intl.DateTimeFormat('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '-';
 const liveTimeTenth = (value: string | null) => {
@@ -257,13 +259,31 @@ function SimulateView() {
   const [tokens, setTokens] = useState<LiveToken[]>([]);
   const [hit, setHit] = useState({ good: 0, defect: 0 });
   const [lastIn, setLastIn] = useState<{ good?: string; defect?: string }>({});
-  const [bursts, setBursts] = useState<{ key: string; kind: 'good' | 'defect' }[]>([]);
-  const seen = useRef<Set<string> | null>(null);
-  const newestTs = useRef(0);
+  const [bursts, setBursts] = useState<{ key: string; kind: 'good' | 'defect'; count: number }[]>([]);
+  // created_at (ms) of the newest batch already on screen; null until the first load (no replay of old batches)
+  const seenBatch = useRef<number | null>(null);
   // Measured when a new event first reaches this browser: CIRA timestamp -> screen, DB write -> screen.
   const [arrival, setArrival] = useState<{ e2e: number; dbToScreen: number; at: number } | null>(null);
   const lastSpawn = useRef(0);
   const landTimers = useRef<number[]>([]);
+  // Live feed shows one row per DB batch; clicking a row loads that batch's events.
+  const [openBatches, setOpenBatches] = useState<Record<string, LiveEvent[] | 'loading' | 'error'>>({});
+  const toggleBatch = async (createdAt: string) => {
+    if (openBatches[createdAt]) {
+      setOpenBatches((current) => { const next = { ...current }; delete next[createdAt]; return next; });
+      return;
+    }
+    setOpenBatches((current) => ({ ...current, [createdAt]: 'loading' }));
+    try {
+      const response = await fetch(`/api/live/batch?created_at=${encodeURIComponent(createdAt)}`, { cache: 'no-store' });
+      const payload = await response.json() as { events?: LiveEvent[]; error?: string };
+      if (!response.ok || !payload.events) throw new Error(payload.error);
+      const events = payload.events;
+      setOpenBatches((current) => (createdAt in current ? { ...current, [createdAt]: events } : current));
+    } catch {
+      setOpenBatches((current) => (createdAt in current ? { ...current, [createdAt]: 'error' } : current));
+    }
+  };
   useEffect(() => () => { landTimers.current.forEach((t) => window.clearTimeout(t)); }, []);
 
   const state = live?.device?.state ?? (live ? 'offline' : null);
@@ -271,8 +291,7 @@ function SimulateView() {
 
   useEffect(() => {
     let active = true;
-    seen.current = null;
-    newestTs.current = 0;
+    seenBatch.current = null;
     setQueue([]); setTokens([]);
     const load = async () => {
       try {
@@ -283,18 +302,26 @@ function SimulateView() {
         const nowState = payload.device?.state ?? 'offline';
         const nowPlaying = nowState === 'playing' || nowState === 'started';
         shell.report({ state: nowState, deviceId: payload.device?.device_id ?? null, epm: payload.events_last_minute, model: payload.recent[0]?.model_version ?? null });
-        if (seen.current && nowPlaying) {
-          const fresh = payload.recent.filter((event) => !seen.current?.has(event.event_id) && Date.parse(event.ts ?? '') >= newestTs.current).reverse();
+        const batchMs = (b: LiveBatch) => Date.parse(b.created_at ?? '') || 0;
+        if (seenBatch.current !== null && nowPlaying) {
+          const since = seenBatch.current;
+          const fresh = payload.batches.filter((b) => batchMs(b) > since).reverse(); // oldest first
           if (fresh.length) {
             const newest = fresh[fresh.length - 1];
             const received = Date.now();
-            setArrival({ e2e: (received - Date.parse(newest.ts ?? '')) / 1000, dbToScreen: (received - Date.parse(newest.created_at ?? '')) / 1000, at: received });
-            const next = fresh.map((event) => ({ id: event.event_id, kind: liveKind(event), fruit: event.fruit_type, trackId: String(event.track_id ?? '-'), conf: liveConf(event.confidence) }));
+            setArrival({ e2e: (received - Date.parse(newest.last_ts ?? '')) / 1000, dbToScreen: (received - batchMs(newest)) / 1000, at: received });
+            const next = fresh.flatMap((b): LiveToken[] => {
+              const batch = b.created_at ?? '';
+              const fruit = payload.recent.find((e) => e.created_at === b.created_at)?.fruit_type ?? null;
+              const good = b.n - b.defect;
+              const base = { batch, label: liveTime(b.created_at), total: b.n, good, defect: b.defect, fruit };
+              const lead: LiveToken = { ...base, id: `${batch}-g`, kind: 'good', lead: true, carrier: good === 0, count: good };
+              return b.defect ? [lead, { ...base, id: `${batch}-d`, kind: 'defect', lead: false, carrier: false, count: b.defect }] : [lead];
+            });
             setQueue((current) => [...current, ...next].slice(-LIVE_QUEUE_MAX));
           }
         }
-        seen.current = new Set(payload.recent.map((event) => event.event_id));
-        newestTs.current = Math.max(newestTs.current, ...payload.recent.map((event) => Date.parse(event.ts ?? '') || 0));
+        seenBatch.current = Math.max(seenBatch.current ?? 0, ...payload.batches.map(batchMs));
         setLive(payload);
         setError('');
       } catch (loadError) {
@@ -307,43 +334,45 @@ function SimulateView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [windowMin]);
 
-  // Release queued events onto the belt one at a time.
+  // Release queued batches onto the belt one batch (lead + defect pile together) at a time.
   useEffect(() => {
     if (!playing) { if (queue.length) setQueue([]); return; }
     if (!queue.length) return;
     const wait = Math.max(0, LIVE_SPAWN_GAP_MS - (Date.now() - lastSpawn.current));
     const id = window.setTimeout(() => {
       lastSpawn.current = Date.now();
-      const [next, ...rest] = queue;
-      setQueue(rest);
-      setTokens((current) => [...current, next]);
+      const group = queue.filter((t) => t.batch === queue[0].batch);
+      setQueue(queue.slice(group.length));
+      setTokens((current) => [...current, ...group]);
       // Timer (not animationend) so baskets stay correct even if the tab is hidden.
-      landTimers.current.push(window.setTimeout(() => land(next), LIVE_TRAVEL_MS));
+      group.forEach((token) => landTimers.current.push(window.setTimeout(() => land(token), LIVE_TRAVEL_MS)));
     }, wait);
     return () => window.clearTimeout(id);
   }, [queue, playing]);
 
   const land = (token: LiveToken) => {
     setTokens((current) => current.filter((item) => item.id !== token.id));
-    setHit((current) => ({ ...current, [token.kind]: current[token.kind] + 1 }));
-    setLastIn((current) => ({ ...current, [token.kind]: token.trackId }));
+    if (!token.count) return;
+    setHit((current) => ({ ...current, [token.kind]: current[token.kind] + token.count }));
+    setLastIn((current) => ({ ...current, [token.kind]: `batch ${token.label}` }));
     const key = `${token.id}-burst`;
-    setBursts((current) => [...current.slice(-5), { key, kind: token.kind }]);
+    setBursts((current) => [...current.slice(-5), { key, kind: token.kind, count: token.count }]);
     landTimers.current.push(window.setTimeout(() => setBursts((current) => current.filter((b) => b.key !== key)), 900));
   };
 
   const totals = live?.totals ?? { total: 0, good: 0, defect: 0 };
   const inFlight = [...queue, ...tokens];
+  const inFlightCount = (kind: 'good' | 'defect') => inFlight.filter((t) => t.kind === kind).reduce((acc, t) => acc + t.count, 0);
   const shown = {
-    good: Math.max(0, totals.good - inFlight.filter((t) => t.kind === 'good').length),
-    defect: Math.max(0, totals.defect - inFlight.filter((t) => t.kind === 'defect').length),
+    good: Math.max(0, totals.good - inFlightCount('good')),
+    defect: Math.max(0, totals.defect - inFlightCount('defect')),
   };
   const defectRate = totals.total ? ((totals.defect / totals.total) * 100).toFixed(1) : '0.0';
   const windowLabel = liveWindows.find((w) => w.v === windowMin)?.label ?? '';
   const tone = (value: string): 'good' | 'bad' | 'neutral' => value === 'online' ? 'good' : value === 'offline' ? 'bad' : 'neutral';
   const label = (value: string) => value === 'online' ? 'Online' : value === 'offline' ? 'Offline' : 'ไม่ทราบ';
   const internetState = health.internet;
-  const activeIds = new Set(tokens.map((t) => t.id));
+  const activeBatches = new Set(tokens.map((t) => t.batch));
   const lastEventAgo = live?.last_event_at ? Math.max(0, Math.round((Date.parse(live.now) - Date.parse(live.last_event_at)) / 1000)) : null;
   const latest = live?.recent[0];
   const ingest = live?.ingest_latency;
@@ -353,24 +382,21 @@ function SimulateView() {
 
   // Batches: the writer flushes when BATCH_SIZE rows are buffered ("เต็ม") or FLUSH_SEC has passed ("ครบเวลา").
   const batchCfg = live?.batch_config;
-  const batchInfo = new Map((live?.batches ?? []).map((b) => [b.created_at, b]));
   const batchReason = (n: number) => batchCfg && n >= batchCfg.size ? `เต็ม ${batchCfg.size}` : `ครบเวลา ${batchCfg?.flush_sec ?? '-'} วิ`;
   const batchWait = (b: { created_at: string | null; first_ts: string | null }) =>
     b.created_at && b.first_ts ? Math.max(0, (Date.parse(b.created_at) - Date.parse(b.first_ts)) / 1000) : null;
-  const feedGroups: { key: string; batch: LiveBatch; events: LiveEvent[] }[] = [];
-  for (const event of live?.recent ?? []) {
-    const key = event.created_at ?? event.event_id;
-    const group = feedGroups[feedGroups.length - 1];
-    if (group && group.key === key) { group.events.push(event); continue; }
-    const known = event.created_at ? batchInfo.get(event.created_at) : undefined;
-    feedGroups.push({ key, events: [event], batch: known ?? { created_at: event.created_at, n: 0, first_ts: null, last_ts: null } });
-  }
-  for (const group of feedGroups) {
-    // A batch older than the 10-minute summary window: describe it from the rows we have.
-    if (!group.batch.n) {
-      const times = group.events.map((e) => e.ts).filter((t): t is string => !!t).sort();
-      group.batch = { ...group.batch, n: group.events.length, first_ts: times[0] ?? null, last_ts: times[times.length - 1] ?? null };
+  // Batches of the last 10 minutes; when the line has been idle longer, rebuild them from the latest events.
+  let feedBatches: LiveBatch[] = live?.batches ?? [];
+  if (!feedBatches.length && live?.recent.length) {
+    const groups = new Map<string, LiveEvent[]>();
+    for (const event of live.recent) {
+      if (!event.created_at) continue;
+      groups.set(event.created_at, [...(groups.get(event.created_at) ?? []), event]);
     }
+    feedBatches = [...groups.entries()].map(([createdAt, events]) => {
+      const times = events.map((e) => e.ts).filter((t): t is string => !!t).sort();
+      return { created_at: createdAt, n: events.length, defect: events.filter((e) => liveKind(e) === 'defect').length, first_ts: times[0] ?? null, last_ts: times[times.length - 1] ?? null };
+    });
   }
   const lastBatch = live?.batches[0];
   const lastBatchAgo = lastBatch?.created_at && live ? Math.max(0, Math.round((Date.parse(live.now) - Date.parse(lastBatch.created_at)) / 1000)) : null;
@@ -415,7 +441,7 @@ function SimulateView() {
     <div className="live-main">
       <div className="live-left">
         <div className="card live-stage-card">
-          <div className="live-card-head"><h2>Sorting</h2><span>{!live ? 'กำลังโหลด...' : playing ? (inFlight.length ? `● กำลังคัด ${inFlight.length} ผล` : '● รอผลไม้ผ่านกล้อง') : '○ หยุด · ไม่มี heartbeat'}</span></div>
+          <div className="live-card-head"><h2>Sorting</h2><span>{!live ? 'กำลังโหลด...' : playing ? (inFlight.length ? `● กำลังคัด ${inFlightCount('good') + inFlightCount('defect')} ผล · ${new Set(inFlight.map((t) => t.batch)).size} batch` : '● รอผลไม้ผ่านกล้อง') : '○ หยุด · ไม่มี heartbeat'}</span></div>
           <div className={`live-stage ${live && !playing ? 'stopped' : ''}`}>
             <div className="lv-scene">
               <svg className="lv-belts" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -426,18 +452,25 @@ function SimulateView() {
               <div className="lv-hud lv-hud-live"><i className={playing ? 'on' : ''} />{playing ? 'LIVE' : 'STOP'}<span>{live?.device?.device_id ?? '-'} · {live?.events_last_minute ?? 0} ผล/นาที</span></div>
               <div className="lv-hud lv-hud-cam"><Camera size={12} />AI VISION<span>{latest?.model_version ?? '-'} · {latest?.camera_view ?? '-'}</span></div>
               <div className="lv-hud lv-hud-fork">AI DECISION</div>
-              {tokens.map((token) => <Fragment key={token.id}>
-                <div className={`lv-flash ${token.kind}`} />
-                <div className={`lv-token ${token.kind}`}>
-                  <div className="lv-bbox"><span>{token.fruit ?? 'fruit'} {token.conf}</span></div>
-                  <div className="lv-fruit">{liveEmoji(token.fruit)}</div>
-                  <div className="lv-id">#{token.trackId}</div>
-                  <div className="lv-result">{token.kind === 'good' ? 'ดี' : 'เสีย'} {token.conf}</div>
-                </div>
-              </Fragment>)}
-              <div className="lv-hud lv-bin good"><span>ตะกร้าดี</span><strong key={`g${hit.good}`} className={hit.good ? 'pop' : ''}>{shown.good.toLocaleString()}</strong><em>{lastIn.good ? `ล่าสุด #${lastIn.good}` : ' '}</em></div>
-              <div className="lv-hud lv-bin bad"><span>ตะกร้าเสีย</span><strong key={`d${hit.defect}`} className={hit.defect ? 'pop' : ''}>{shown.defect.toLocaleString()}</strong><em>{lastIn.defect ? `ล่าสุด #${lastIn.defect}` : ' '}</em></div>
-              {bursts.map((burst) => <div key={burst.key} className={`lv-burst ${burst.kind}`}><b>+1</b><i /></div>)}
+              {tokens.map((token) => {
+                const pile = Array.from({ length: Math.min(token.lead ? token.total : token.count, 5) }, (_, i) => <span key={i}>{liveEmoji(token.fruit)}</span>);
+                return <Fragment key={token.id}>
+                  {token.lead && <div className={`lv-flash ${token.defect ? 'defect' : 'good'}`} />}
+                  <div className={`lv-token pile ${token.kind}`}>
+                    <div className={`lv-pile-body ${token.lead ? (token.carrier ? 'carrier' : 'lead') : 'split'}`}>
+                      {token.lead && <div className="lv-bbox wide"><span>AI · {token.total} ผล</span></div>}
+                      <div className="lv-pile">{pile}</div>
+                      <div className="lv-id">batch {token.label}</div>
+                      {token.lead
+                        ? <div className="lv-result swap"><span className="pre">ดี {token.good} · เสีย {token.defect}</span><span className="post">ดี +{token.good}</span></div>
+                        : <div className="lv-result">เสีย +{token.count}</div>}
+                    </div>
+                  </div>
+                </Fragment>;
+              })}
+              <div className="lv-hud lv-bin good"><span>ตะกร้าดี</span><strong key={`g${hit.good}`} className={hit.good ? 'pop' : ''}>{shown.good.toLocaleString()}</strong><em>{lastIn.good ? `ล่าสุด ${lastIn.good}` : ' '}</em></div>
+              <div className="lv-hud lv-bin bad"><span>ตะกร้าเสีย</span><strong key={`d${hit.defect}`} className={hit.defect ? 'pop' : ''}>{shown.defect.toLocaleString()}</strong><em>{lastIn.defect ? `ล่าสุด ${lastIn.defect}` : ' '}</em></div>
+              {bursts.map((burst) => <div key={burst.key} className={`lv-burst ${burst.kind}`}><b>+{burst.count}</b><i /></div>)}
               {live && !playing && <div className="lv-stopped"><Power size={20} /><strong>เครื่องหยุด</strong><span>heartbeat ล่าสุด {live.device?.age_sec == null ? '-' : `${live.device.age_sec} วินาทีที่แล้ว`}</span></div>}
             </div>
           </div>
@@ -454,23 +487,38 @@ function SimulateView() {
       </div>
 
       <div className="card live-feed">
-        <div className="live-card-head"><h2>Live feed</h2><span>{live?.recent.length ?? 0} event ล่าสุด · จัดกลุ่มตาม batch ที่เขียนลง DB</span></div>
+        <div className="live-card-head"><h2>Live feed</h2><span>{feedBatches.length} batch ล่าสุดที่เขียนลง DB · กดเพื่อดู #</span></div>
         <div className="live-feed-list">
-          {feedGroups.length ? feedGroups.map((group) => <Fragment key={group.key}>
-            <div className="live-batch-head" title="ทุก event ในกลุ่มนี้ถูกเขียนลง DB พร้อมกันใน transaction เดียว">
-              <b>batch {liveTime(group.batch.created_at)}</b>
-              <span>{group.batch.n} event{group.events.length < group.batch.n ? ` (แสดง ${group.events.length})` : ''}</span>
-              <span>CORE {liveTimeTenth(group.batch.first_ts)}–{liveTimeTenth(group.batch.last_ts).slice(-4)}</span>
-              <span>รอ {sec(batchWait(group.batch))}</span>
-              <em className={batchCfg && group.batch.n >= batchCfg.size ? 'full' : ''}>{batchReason(group.batch.n)}</em>
-            </div>
-            {group.events.map((event) => <div key={event.event_id} className={`live-feed-row ${activeIds.has(event.event_id) ? 'active' : ''}`}>
-            <span className="live-feed-time">{liveTime(event.ts)}</span>
-            <span className="live-feed-fruit">{liveEmoji(event.fruit_type)} <b>#{event.track_id ?? '-'}</b></span>
-            <span className="live-feed-detail">{event.external_result === 'defect' ? (event.defect_type ?? 'defect') : 'ผ่าน'} · {liveConf(event.confidence)}<em>{event.camera_view ?? '-'} · {event.model_version ?? '-'}</em></span>
-            <StatusPill tone={liveKind(event) === 'defect' ? 'warn' : 'good'}>{liveKind(event) === 'defect' ? 'เสีย' : 'ดี'}</StatusPill>
-            </div>)}
-          </Fragment>) : <div className="empty">ยังไม่มี event</div>}
+          {feedBatches.length ? feedBatches.map((batch, index) => {
+            const key = batch.created_at ?? String(index);
+            const open = batch.created_at ? openBatches[batch.created_at] : undefined;
+            const fresh = index === 0 && batch.created_at && live ? Date.parse(live.now) - Date.parse(batch.created_at) < 4000 : false;
+            return <Fragment key={key}>
+              <button type="button" className={`live-batch-head ${open ? 'open' : ''} ${fresh ? 'fresh' : ''} ${batch.created_at && activeBatches.has(batch.created_at) ? 'onbelt' : ''}`} aria-expanded={!!open}
+                title="ทุก event ใน batch นี้ถูกเขียนลง DB พร้อมกันใน transaction เดียว · กดเพื่อดู event"
+                onClick={() => { if (batch.created_at) void toggleBatch(batch.created_at); }}>
+                <span className="live-batch-line">
+                  <ChevronRight size={13} className="live-batch-chev" />
+                  <b>batch {liveTime(batch.created_at)}</b>
+                  <span>{batch.n} event</span>
+                  <span className="live-batch-split"><i className="g">ดี {batch.n - batch.defect}</i> · <i className="d">เสีย {batch.defect}</i></span>
+                </span>
+                <span className="live-batch-line sub">
+                  <span>CORE {liveTimeTenth(batch.first_ts)}–{liveTimeTenth(batch.last_ts).slice(-4)}</span>
+                  <span>รอ {sec(batchWait(batch))}</span>
+                  <em className={batchCfg && batch.n >= batchCfg.size ? 'full' : ''}>{batchReason(batch.n)}</em>
+                </span>
+              </button>
+              {open === 'loading' && <div className="live-batch-note">กำลังโหลด...</div>}
+              {open === 'error' && <div className="live-batch-note">โหลด event ของ batch นี้ไม่สำเร็จ</div>}
+              {Array.isArray(open) && open.map((event) => <div key={event.event_id} className="live-feed-row in-batch">
+                <span className="live-feed-time">{liveTime(event.ts)}</span>
+                <span className="live-feed-fruit">{liveEmoji(event.fruit_type)} <b>#{event.track_id ?? '-'}</b></span>
+                <span className="live-feed-detail">{event.external_result === 'defect' ? (event.defect_type ?? 'defect') : 'ผ่าน'} · {liveConf(event.confidence)}<em>{event.camera_view ?? '-'} · {event.model_version ?? '-'}</em></span>
+                <StatusPill tone={liveKind(event) === 'defect' ? 'warn' : 'good'}>{liveKind(event) === 'defect' ? 'เสีย' : 'ดี'}</StatusPill>
+              </div>)}
+            </Fragment>;
+          }) : <div className="empty">ยังไม่มี event</div>}
         </div>
       </div>
     </div>

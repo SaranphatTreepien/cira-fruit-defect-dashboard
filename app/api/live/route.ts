@@ -70,9 +70,10 @@ export async function GET(request: NextRequest) {
       // mqtt_to_db.py writes each batch in one transaction, so every row of a batch shares the
       // same created_at (now() of that transaction): created_at identifies the batch.
       pool.query(
-        `SELECT created_at, count(*)::int AS n, min(ts) AS first_ts, max(ts) AS last_ts
+        `SELECT created_at, count(*)::int AS n, min(ts) AS first_ts, max(ts) AS last_ts,
+                count(*) FILTER (WHERE external_result = 'defect')::int AS defect
          FROM fruit_events WHERE created_at >= now() - interval '10 minutes'
-         GROUP BY created_at ORDER BY created_at DESC LIMIT 20`,
+         GROUP BY created_at ORDER BY created_at DESC LIMIT 30`,
       ),
     ]);
 
@@ -121,6 +122,7 @@ export async function GET(request: NextRequest) {
       batches: batches.rows.map((row) => ({
         created_at: iso(row.created_at),
         n: row.n,
+        defect: row.defect,
         first_ts: iso(row.first_ts),
         last_ts: iso(row.last_ts),
       })),
