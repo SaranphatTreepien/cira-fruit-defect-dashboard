@@ -224,7 +224,11 @@ type LiveData = {
   events_last_minute: number;
   recent: LiveEvent[];
   ingest_latency: { avg_s: number | null; max_s: number | null; n: number };
+  batch_config: { size: number; flush_sec: number };
+  batches: LiveBatch[];
 };
+// One DB write by mqtt_to_db.py: all its rows share created_at.
+type LiveBatch = { created_at: string | null; n: number; first_ts: string | null; last_ts: string | null };
 type LiveHealth = { db: string; mqtt: string; internet: string };
 type LiveToken = { id: string; kind: 'good' | 'defect'; fruit: string | null; trackId: string; conf: string };
 
@@ -234,6 +238,11 @@ const LIVE_QUEUE_MAX = 12;
 const LIVE_SPAWN_GAP_MS = 750;
 const LIVE_TRAVEL_MS = 3400; // must match .lv-token animation-duration in globals.css
 const liveTime = (value: string | null) => value ? new Intl.DateTimeFormat('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '-';
+const liveTimeTenth = (value: string | null) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  return `${liveTime(value)}.${Math.floor(date.getMilliseconds() / 100)}`;
+};
 const liveConf = (value: number | null) => value == null ? '-' : `${(value <= 1 ? value * 100 : value).toFixed(0)}%`;
 const liveEmoji = (fruit: string | null) => (fruit && fruitEmoji[fruit]) || '🍈';
 const liveKind = (event: LiveEvent): 'good' | 'defect' => event.external_result === 'defect' ? 'defect' : 'good';
@@ -342,6 +351,31 @@ function SimulateView() {
   const sec = (value: number | null | undefined) => value == null || Number.isNaN(value) ? '-' : `${value.toFixed(1)} วิ`;
   const arrivalAge = arrival && live ? Math.round((Date.parse(live.now) - arrival.at) / 1000) : null;
 
+  // Batches: the writer flushes when BATCH_SIZE rows are buffered ("เต็ม") or FLUSH_SEC has passed ("ครบเวลา").
+  const batchCfg = live?.batch_config;
+  const batchInfo = new Map((live?.batches ?? []).map((b) => [b.created_at, b]));
+  const batchReason = (n: number) => batchCfg && n >= batchCfg.size ? `เต็ม ${batchCfg.size}` : `ครบเวลา ${batchCfg?.flush_sec ?? '-'} วิ`;
+  const batchWait = (b: { created_at: string | null; first_ts: string | null }) =>
+    b.created_at && b.first_ts ? Math.max(0, (Date.parse(b.created_at) - Date.parse(b.first_ts)) / 1000) : null;
+  const feedGroups: { key: string; batch: LiveBatch; events: LiveEvent[] }[] = [];
+  for (const event of live?.recent ?? []) {
+    const key = event.created_at ?? event.event_id;
+    const group = feedGroups[feedGroups.length - 1];
+    if (group && group.key === key) { group.events.push(event); continue; }
+    const known = event.created_at ? batchInfo.get(event.created_at) : undefined;
+    feedGroups.push({ key, events: [event], batch: known ?? { created_at: event.created_at, n: 0, first_ts: null, last_ts: null } });
+  }
+  for (const group of feedGroups) {
+    // A batch older than the 10-minute summary window: describe it from the rows we have.
+    if (!group.batch.n) {
+      const times = group.events.map((e) => e.ts).filter((t): t is string => !!t).sort();
+      group.batch = { ...group.batch, n: group.events.length, first_ts: times[0] ?? null, last_ts: times[times.length - 1] ?? null };
+    }
+  }
+  const lastBatch = live?.batches[0];
+  const lastBatchAgo = lastBatch?.created_at && live ? Math.max(0, Math.round((Date.parse(live.now) - Date.parse(lastBatch.created_at)) / 1000)) : null;
+  const batchAvg = live?.batches.length ? live.batches.reduce((acc, b) => acc + b.n, 0) / live.batches.length : null;
+
   return <div className="live-page">
     <div className="card live-head">
       <div className="live-head-title"><h1>Live</h1><span>ข้อมูลจริงจาก DB · อัปเดตทุก 2 วินาที</span></div>
@@ -363,6 +397,9 @@ function SimulateView() {
       <span title="เวลาจาก timestamp ที่ CIRA ใส่ใน event จนเขียนลง DB (เฉลี่ย 50 event ล่าสุด)">CIRA → DB <StatusPill tone={latencyTone(ingest?.avg_s)}>เฉลี่ย {sec(ingest?.avg_s)}</StatusPill> <em>max {sec(ingest?.max_s)}</em></span>
       <span title="เวลาจาก DB เขียนเสร็จจนหน้าเว็บเห็น event (poll ทุก 2 วินาที)">DB → จอ <StatusPill tone={latencyTone(arrival?.dbToScreen)}>{sec(arrival?.dbToScreen)}</StatusPill></span>
       <span title="รวมทั้งหมด: timestamp ของ CIRA จนถึงหน้าเว็บ (ก่อน animation)">รวม CIRA → จอ <StatusPill tone={latencyTone(arrival?.e2e)}>{sec(arrival?.e2e)}</StatusPill></span>
+      <span title={`mqtt_to_db.py เขียนลง DB เป็นชุด: ครบ ${batchCfg?.size ?? '-'} แถว (เต็ม) หรือทุก ${batchCfg?.flush_sec ?? '-'} วิ (ครบเวลา) · เฉลี่ยจาก batch ใน 10 นาทีล่าสุด`}>Batch ล่าสุด {lastBatch
+        ? <><StatusPill tone="neutral">{lastBatch.n} แถว · {batchReason(lastBatch.n)}</StatusPill><em>{lastBatchAgo} วิที่แล้ว · เฉลี่ย {batchAvg?.toFixed(0)} แถว/batch ({live?.batches.length} batch)</em></>
+        : <em>ยังไม่มีใน 10 นาที</em>}</span>
       <em>{arrival ? `วัดจาก event ใหม่ล่าสุด · ${arrivalAge ?? 0} วิที่แล้ว` : 'รอ event ใหม่หลังเปิดหน้าเพื่อวัด DB → จอ'} · poll ทุก 2 วิ · animation +2.4 วิ</em>
     </div>
     {error && <div className="live-banner error">{error}</div>}
@@ -417,14 +454,23 @@ function SimulateView() {
       </div>
 
       <div className="card live-feed">
-        <div className="live-card-head"><h2>Live feed</h2><span>{live?.recent.length ?? 0} event ล่าสุดจาก fruit_events</span></div>
+        <div className="live-card-head"><h2>Live feed</h2><span>{live?.recent.length ?? 0} event ล่าสุด · จัดกลุ่มตาม batch ที่เขียนลง DB</span></div>
         <div className="live-feed-list">
-          {live?.recent.length ? live.recent.map((event) => <div key={event.event_id} className={`live-feed-row ${activeIds.has(event.event_id) ? 'active' : ''}`}>
+          {feedGroups.length ? feedGroups.map((group) => <Fragment key={group.key}>
+            <div className="live-batch-head" title="ทุก event ในกลุ่มนี้ถูกเขียนลง DB พร้อมกันใน transaction เดียว">
+              <b>batch {liveTime(group.batch.created_at)}</b>
+              <span>{group.batch.n} event{group.events.length < group.batch.n ? ` (แสดง ${group.events.length})` : ''}</span>
+              <span>CORE {liveTimeTenth(group.batch.first_ts)}–{liveTimeTenth(group.batch.last_ts).slice(-4)}</span>
+              <span>รอ {sec(batchWait(group.batch))}</span>
+              <em className={batchCfg && group.batch.n >= batchCfg.size ? 'full' : ''}>{batchReason(group.batch.n)}</em>
+            </div>
+            {group.events.map((event) => <div key={event.event_id} className={`live-feed-row ${activeIds.has(event.event_id) ? 'active' : ''}`}>
             <span className="live-feed-time">{liveTime(event.ts)}</span>
             <span className="live-feed-fruit">{liveEmoji(event.fruit_type)} <b>#{event.track_id ?? '-'}</b></span>
             <span className="live-feed-detail">{event.external_result === 'defect' ? (event.defect_type ?? 'defect') : 'ผ่าน'} · {liveConf(event.confidence)}<em>{event.camera_view ?? '-'} · {event.model_version ?? '-'}</em></span>
             <StatusPill tone={liveKind(event) === 'defect' ? 'warn' : 'good'}>{liveKind(event) === 'defect' ? 'เสีย' : 'ดี'}</StatusPill>
-          </div>) : <div className="empty">ยังไม่มี event</div>}
+            </div>)}
+          </Fragment>) : <div className="empty">ยังไม่มี event</div>}
         </div>
       </div>
     </div>

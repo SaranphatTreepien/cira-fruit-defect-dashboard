@@ -441,6 +441,11 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 .live-feed-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
 .live-feed-row { display: grid; grid-template-columns: 62px 64px 1fr auto; gap: 8px; align-items: center; padding: 7px 6px; border-bottom: 1px solid #edf3ee; border-radius: 8px; font-size: 12px; transition: background .3s; }
 .live-feed-row.active { background: #eef8f1; }
+.live-batch-head { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 8px; padding: 6px 8px; border-radius: 8px; background: #f2f7f4; border: 1px solid #e1ece5; font-size: 11px; color: #6b7d74; font-variant-numeric: tabular-nums; }
+.live-batch-head:first-child { margin-top: 0; }
+.live-batch-head b { color: var(--ink); }
+.live-batch-head em { margin-left: auto; font-style: normal; padding: 1px 7px; border-radius: 999px; background: #e8eef1; color: #4f6470; }
+.live-batch-head em.full { background: #fff1e0; color: #9a5b12; }
 .live-feed-time { color: #8a9d94; font-size: 11px; font-variant-numeric: tabular-nums; }
 .live-feed-fruit b { color: var(--ink); }
 .live-feed-detail { color: #4f6459; min-width: 0; } .live-feed-detail em { display: block; font-style: normal; font-size: 10px; color: #a0b0a7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

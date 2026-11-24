@@ -5,6 +5,8 @@ import { requireUser } from '@/lib/auth';
 export const dynamic = 'force-dynamic';
 
 const ALLOWED_WINDOWS = [5, 15, 60, 480, 1440];
+const BATCH_SIZE = Number(process.env.BATCH_SIZE) || 50;
+const FLUSH_SEC = Number(process.env.FLUSH_SEC) || 1;
 
 export async function GET(request: NextRequest) {
   const auth = await requireUser();
@@ -33,7 +35,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const [device, last, byFruit, rate, recent, byDefect, latency] = await Promise.all([
+    const [device, last, byFruit, rate, recent, byDefect, latency, batches] = await Promise.all([
       pool.query(`SELECT device_id, source_type, state, last_seen, age_sec
                   FROM device_status_live ORDER BY last_seen DESC LIMIT 1`),
       pool.query('SELECT max(ts) AS last_event_at FROM fruit_events'),
@@ -51,7 +53,7 @@ export async function GET(request: NextRequest) {
       pool.query(
         `SELECT event_id, ts, fruit_type, external_result, defect_type, confidence,
                 track_id, camera_view, model_version, created_at
-         FROM fruit_events ORDER BY ts DESC, created_at DESC LIMIT 30`,
+         FROM fruit_events ORDER BY created_at DESC, ts DESC LIMIT 30`,
       ),
       pool.query(
         `SELECT defect_type, count(*)::int AS n FROM fruit_events
@@ -64,6 +66,13 @@ export async function GET(request: NextRequest) {
         `SELECT avg(d) AS avg_s, max(d) AS max_s, count(*)::int AS n FROM (
            SELECT extract(epoch FROM created_at - ts) AS d FROM fruit_events
            ORDER BY created_at DESC LIMIT 50) t`,
+      ),
+      // mqtt_to_db.py writes each batch in one transaction, so every row of a batch shares the
+      // same created_at (now() of that transaction): created_at identifies the batch.
+      pool.query(
+        `SELECT created_at, count(*)::int AS n, min(ts) AS first_ts, max(ts) AS last_ts
+         FROM fruit_events WHERE created_at >= now() - interval '10 minutes'
+         GROUP BY created_at ORDER BY created_at DESC LIMIT 20`,
       ),
     ]);
 
@@ -106,6 +115,15 @@ export async function GET(request: NextRequest) {
         max_s: latency.rows[0]?.max_s == null ? null : Number(latency.rows[0].max_s),
         n: latency.rows[0]?.n ?? 0,
       },
+      // Writer settings (same .env.local the writer reads): a batch of BATCH_SIZE rows was flushed
+      // because it was full; a smaller one because FLUSH_SEC passed.
+      batch_config: { size: BATCH_SIZE, flush_sec: FLUSH_SEC },
+      batches: batches.rows.map((row) => ({
+        created_at: iso(row.created_at),
+        n: row.n,
+        first_ts: iso(row.first_ts),
+        last_ts: iso(row.last_ts),
+      })),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Live query failed';
