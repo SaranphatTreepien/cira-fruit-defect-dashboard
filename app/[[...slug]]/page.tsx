@@ -244,7 +244,7 @@ type LiveHealth = { db: string; mqtt: string; internet: string };
 // One fruit on the belt (or a bundle of same-result fruit when the line is faster than the belt can show).
 // Each event is replayed at its CORE timestamp + a playback offset, so fruit flow one by one instead of
 // arriving as one pile per DB batch.
-type LiveToken = { id: string; batch: string; kind: 'good' | 'defect'; fruit: string | null; count: number; conf: number | null; defectType: string | null; track: number | null; model: string | null; modelSwitch: { from: string; to: string } | null; spawnedAt: number };
+type LiveToken = { id: string; batch: string; kind: 'good' | 'defect'; fruit: string | null; count: number; conf: number | null; defectType: string | null; track: number | null; model: string | null; ts: string | null; modelSwitch: { from: string; to: string } | null; spawnedAt: number };
 type LivePending = LiveToken & { at: number };
 
 const liveWindows = [{ v: 5, label: '5 นาที' }, { v: 15, label: '15 นาที' }, { v: 60, label: '1 ชม.' }, { v: 480, label: '8 ชม.' }, { v: 1440, label: '24 ชม.' }];
@@ -446,7 +446,7 @@ function SimulateView() {
       }
       return {
         id: e.event_id, batch: e.created_at ?? '', kind: liveKind(e), fruit: e.fruit_type, count: 1, conf: e.confidence,
-        defectType: e.defect_type, track: e.track_id, model: e.model_version, modelSwitch, spawnedAt: 0,
+        defectType: e.defect_type, track: e.track_id, model: e.model_version, ts: e.ts, modelSwitch, spawnedAt: 0,
         at: Number.isNaN(ts) ? received : ts + offset,
       };
     });
@@ -696,7 +696,9 @@ function SimulateView() {
             <div className={`lv-scene ${view === '3d' ? 'lv3d' : ''}`}>
               {view === '3d' && <LiveScene3D tokens={tokens} travelMs={LIVE_TRAVEL_3D_MS} playing={playing} paddleKey={paddleKey} modelKey={modelBanner?.key ?? 0} powerKey={powerKey}
                 alert={sceneAlert ? (sceneAlert.level === 'critical' ? 'critical' : 'warning') : null} tv={tv}
-                seed={{ good: shown.good, defect: shown.defect, fruits: live?.by_fruit.map((f) => f.fruit_type).filter((f) => f !== 'unknown') ?? [] }} />}
+                seed={{ good: shown.good, defect: shown.defect, fruits: live?.by_fruit.map((f) => f.fruit_type).filter((f) => f !== 'unknown') ?? [] }}
+                bins={{ good: shown.good, defect: shown.defect, lastGood: lastIn.good ?? null, lastDefect: lastIn.defect ?? null, hitGood: hit.good, hitDefect: hit.defect }}
+                stats={{ epm: live?.events_last_minute ?? 0, defectRate, spark }} />}
               {view === '2d' && <>
               <svg className="lv-belts" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                 <polyline className={`lv-belt ${playing ? 'run' : winding ? 'wind' : ''}`} points="0,48 46,48 54,43 60,38 70,35.5 80,33 84,30" />
@@ -723,6 +725,7 @@ function SimulateView() {
                   </div>
                 </Fragment>;
               })}
+              {view === '2d' && <>
               <div className="lv-hud lv-bin good">
                 <span>ตะกร้าดี</span><strong key={`g${hit.good}`} className={hit.good ? 'pop' : ''}>{shown.good.toLocaleString()}</strong>
                 <div className="lv-fill" title="สัดส่วนของผลที่ลงตะกร้าแล้วในช่วงนี้"><i style={{ width: `${shownSum ? (shown.good / shownSum) * 100 : 0}%` }} /></div>
@@ -733,6 +736,7 @@ function SimulateView() {
                 <div className="lv-fill" title="สัดส่วนของผลที่ลงตะกร้าแล้วในช่วงนี้"><i style={{ width: `${shownSum ? (shown.defect / shownSum) * 100 : 0}%` }} /></div>
                 <em>{lastIn.defect ? `ล่าสุด ${lastIn.defect}` : ' '}</em>
               </div>
+              </>}
               {view === '2d' && bursts.map((burst) => <div key={burst.key} className={`lv-burst ${burst.kind}`}>
                 <b>+{burst.count}</b><i className="ring" />
                 {Array.from({ length: 9 }, (_, i) => <i key={i} className="spark" style={{ ['--a' as string]: `${i * 40 + 10}deg`, ['--d' as string]: `${3 + (i % 3)}cqw` } as React.CSSProperties} />)}
