@@ -745,12 +745,12 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 .lv3d-cross { position: absolute; left: 50%; top: 50%; z-index: 7; width: 14px; height: 14px; transform: translate(-50%, -50%); pointer-events: none; }
 .lv3d-cross::before, .lv3d-cross::after { content: ""; position: absolute; background: rgba(255,255,255,.9); box-shadow: 0 0 2px rgba(0,0,0,.6); }
 .lv3d-cross::before { left: 6px; top: 0; width: 2px; height: 14px; } .lv3d-cross::after { top: 6px; left: 0; height: 2px; width: 14px; }
-.lv3d-walk-help { position: absolute; left: 50%; top: 4%; z-index: 9; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 20px; border-radius: 14px; background: rgba(8,28,22,.86); color: #dff7ee; box-shadow: 0 10px 30px rgba(0,0,0,.35); text-align: center; }
+.lv3d-walk-help { position: absolute; left: 50%; bottom: 11%; z-index: 9; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 20px; border-radius: 14px; background: rgba(8,28,22,.86); color: #dff7ee; box-shadow: 0 10px 30px rgba(0,0,0,.35); text-align: center; }
 .lv3d-walk-help b { font-size: 15px; }
 .lv3d-walk-help > button { border: 0; border-radius: 9px; padding: 8px 18px; background: #ffd21f; color: #3a2a00; font: 900 13px var(--font-thai), sans-serif; cursor: pointer; }
 .lv3d-walk-help ul { margin: 0; padding: 0; list-style: none; font-size: 11px; line-height: 1.9; color: #b9dccd; }
 .lv3d-root kbd { display: inline-block; padding: 0 5px; border-radius: 4px; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.3); font: 800 10px/1.6 ui-monospace, monospace; color: #fff; }
-.lv3d-prompt { position: absolute; left: 50%; bottom: 14%; z-index: 7; transform: translateX(-50%); padding: 6px 14px; border-radius: 10px; background: rgba(8,28,22,.85); color: #fff; font-size: 13px; font-weight: 800; pointer-events: none; }
+.lv3d-prompt { position: absolute; left: 50%; top: 58%; z-index: 7; transform: translateX(-50%); padding: 6px 14px; border-radius: 10px; background: rgba(8,28,22,.85); color: #fff; font-size: 13px; font-weight: 800; pointer-events: none; }
 .lv3d-crate { position: absolute; right: 1.2%; top: 3%; bottom: 13%; z-index: 8; width: 270px; overflow: auto; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,.96); border: 2px solid; box-shadow: 0 10px 30px rgba(16,53,42,.3); color: #10352a; font-size: 12px; animation: lvBannerIn3d .25s ease-out; }
 .lv3d-crate.good { border-color: #38c983; } .lv3d-crate.defect { border-color: #ef8d3f; }
 .lv3d-crate .big { display: block; font-size: 30px; font-weight: 900; letter-spacing: -.03em; line-height: 1.1; }
@@ -780,3 +780,10 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 .live-stage.stopped .lv-scene.lv3d { filter: none; }
 .lv3d-root.walking .lv3d-pick { top: calc(3% + 162px); }
 .lv3d-pick-note { margin: 6px 0 0; font-size: 10px; color: #8a6a1a; }
+.lv3d-cams select { border: 0; border-radius: 7px; padding: 4px 8px; background: #0d7c6c; color: #fff; font: 800 11px/1.2 var(--font-thai), sans-serif; cursor: pointer; }
+.lv3d-map .console { fill: #ffd21f; }
+.lv3d-map .alert { fill: none; stroke: #ff9b2f; stroke-width: .35; animation: lv3dMapPulse 1.2s ease-in-out infinite; }
+.lv3d-map .alert.critical { stroke: #ff3b2f; }
+@keyframes lv3dMapPulse { 50% { opacity: .2; } }
+.lv3d-toast { position: absolute; left: 50%; top: 14%; z-index: 9; transform: translateX(-50%); padding: 7px 14px; border-radius: 10px; background: rgba(120,30,20,.9); color: #fff; font-size: 12px; font-weight: 800; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .lv3d-map .alert { animation: none; } }

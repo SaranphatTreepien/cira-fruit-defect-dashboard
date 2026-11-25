@@ -34,6 +34,10 @@ type Props = {
   // crate panel (window totals from /api/live) and the KPI wall board
   crates: { windowLabel: string; byFruit: { fruit_type: string; good: number; defect: number; total: number }[]; byDefect: { defect_type: string; n: number }[] };
   kpi: { total: number; good: number; defect: number; defectRate: string; epm: number; model: string | null; device: string | null; state: string; playing: boolean; windowLabel: string };
+  system: { db: string; mqtt: string; internet: string; heartbeatAge: number | null; ingestAvg: number | null; ingestMax: number | null; dbToScreen: number | null; lastEventAgo: number | null };
+  // web pause / resume gate (the only control the dashboard has; admin only, confirmed in SimulateView)
+  control: { device: string | null; known: boolean; paused: boolean; waiting: boolean; busy: boolean; err: string; isAdmin: boolean;
+    machine: 'loading' | 'running' | 'paused' | 'stopped'; send: (run: boolean) => void };
 };
 
 // ---- Graphics quality ---------------------------------------------------------------------------
@@ -587,8 +591,8 @@ function Agv({ kind, swap, rim }: { kind: Kind; swap: Swap; rim: THREE.Material 
 }
 
 const TREES: { x: number; z: number; s: number; fruit: string }[] = [
-  { x: -9, z: -6.5, s: 1, fruit: 'orange' }, { x: -3, z: -7.5, s: 1.2, fruit: 'apple' }, { x: 3.5, z: -8, s: 1, fruit: 'orange' },
-  { x: 11.5, z: -7, s: 1.1, fruit: 'apple' }, { x: -12, z: 5, s: 0.9, fruit: 'apple' }, { x: -14, z: 1.5, s: 0.95, fruit: 'orange' },
+  { x: -9, z: -6.5, s: 1, fruit: 'orange' }, { x: -3, z: -7.5, s: 1.2, fruit: 'apple' }, { x: -0.6, z: -10.6, s: 1, fruit: 'orange' },
+  { x: 11.5, z: -7, s: 1.1, fruit: 'apple' }, { x: -17, z: 8.5, s: 0.9, fruit: 'apple' }, { x: -17.5, z: -3.5, s: 0.95, fruit: 'orange' },
 ];
 function Tree({ x, z, s = 1, fruit }: { x: number; z: number; s?: number; fruit: string }) {
   const balls = useMemo(() => Array.from({ length: 8 }, (_, i) => {
@@ -750,9 +754,9 @@ function CrateLabel({ kind, count, last, hit, fill, swapping }: { kind: Kind; co
 }
 
 // ---- Scene --------------------------------------------------------------------------------------
-type LineProps = Props & { env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
+type LineProps = Props & { boardData: BoardData | null; onConsole: () => void; env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
 
-function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
+function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, crates, system, control, boardData, onConsole, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
   const speed = useRef(0);
   const power = useRef(0);
   const scan = useRef<ScanState>({ active: 0, x: CAM.x, defect: false, flash: 0, flashDefect: false });
@@ -922,6 +926,11 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
 
     {TREES.map((t, i) => <Tree key={i} x={t.x} z={t.z} s={t.s} fruit={t.fruit} />)}
     <KpiBoard kpi={kpi} />
+    <HourlyBoard data={boardData} />
+    <ParetoBoard crates={crates} />
+    <AlertBoard data={boardData} />
+    <SystemBoard system={system} />
+    <ControlConsole control={control} onPress={onConsole} />
 
     {tokens.map((t) => <MovingFruit key={t.id} token={t} travelMs={travelMs} pileTarget={targets.current.get(t.id) ?? CRATE[t.kind]}
       selected={pickId === t.id} onPick={onPick} registry={registry} q={q} reduced={reduced} />)}
@@ -936,7 +945,21 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
 
 // ---- Walk mode (first / third person) ------------------------------------------------------------
 // Pure viewing: the player only moves the camera around the line; nothing here writes data.
-const BOARD = { x: -7.4, z: -4.4, w: 6.4, y: 2.75 };
+type BoardDef = { x: number; z: number; rot: number; w: number; y: number; label: string };
+// rot: board faces (sin rot, 0, cos rot); stand in front and look at it with yaw = rot
+const BOARDS: Record<'kpi' | 'hourly' | 'pareto' | 'alerts' | 'system', BoardDef> = {
+  kpi: { x: -7.4, z: -4.4, rot: 0, w: 6.4, y: 2.75, label: 'กระดาน KPI' },
+  hourly: { x: 4.4, z: -9.4, rot: 0, w: 6.0, y: 2.75, label: 'รายชั่วโมง' },
+  pareto: { x: 13.8, z: 0.4, rot: -Math.PI / 2, w: 5.2, y: 2.6, label: 'ชนิดที่เสีย' },
+  alerts: { x: -14.4, z: 1.2, rot: 1.15, w: 5.0, y: 2.6, label: 'Alert' },
+  system: { x: -13.2, z: 6.8, rot: 1.0, w: 5.0, y: 2.6, label: 'สุขภาพระบบ' },
+};
+const BOARD = BOARDS.kpi;
+const CONSOLE = { x: -5.6, z: 5.8 };
+const boardEnds = (b: BoardDef) => {
+  const ax = Math.cos(b.rot) * b.w / 2; const az = -Math.sin(b.rot) * b.w / 2;
+  return { x1: b.x - ax, z1: b.z - az, x2: b.x + ax, z2: b.z + az };
+};
 const SIREN_AT = { x: -2.4, z: -1.6 };
 const EYE = 1.6; const PLAYER_R = 0.35; const BOUND = 32;
 // Obstacles as capsules on the floor (a point when a = b): r = radius, h = height the player can jump over.
@@ -954,7 +977,8 @@ function buildColliders(): Capsule[] {
   for (const t of TREES) cap(t.x, t.z, t.x, t.z, 0.78 * t.s);
   cap(HOLO.pos[0], HOLO.pos[2], HOLO.pos[0], HOLO.pos[2], 0.5);
   cap(SIREN_AT.x, SIREN_AT.z, SIREN_AT.x, SIREN_AT.z, 0.32);
-  cap(BOARD.x - BOARD.w / 2, BOARD.z, BOARD.x + BOARD.w / 2, BOARD.z, 0.2);
+  for (const b of Object.values(BOARDS)) { const e = boardEnds(b); cap(e.x1, e.z1, e.x2, e.z2, 0.22); }
+  cap(CONSOLE.x - 1.1, CONSOLE.z, CONSOLE.x + 1.1, CONSOLE.z, 0.55);
   return out;
 }
 let COLLIDERS: Capsule[] | null = null;
@@ -962,13 +986,15 @@ let COLLIDERS: Capsule[] | null = null;
 type Person = 'first' | 'third';
 type Warp = { x: number; z: number; yaw: number; n: number };
 const WARPS: { key: string; label: string; x: number; z: number; yaw: number }[] = [
-  { key: 'start', label: 'จุดเริ่ม', x: -4, z: 6.5, yaw: 0 },
+  { key: 'start', label: 'จุดเริ่ม', x: -2.5, z: 7.6, yaw: 0 },
   { key: 'gate', label: 'ประตูสแกน', x: -6.4, z: 2.7, yaw: -0.45 },
   { key: 'fork', label: 'ทางแยก', x: 1.2, z: 2.6, yaw: 0.25 },
   { key: 'good', label: 'ตะกร้าดี', x: CRATE.good.x - 2.7, z: CRATE.good.z + 0.4, yaw: -Math.PI / 2 + 0.15 },
   { key: 'defect', label: 'ตะกร้าเสีย', x: CRATE.defect.x - 2.4, z: CRATE.defect.z + 0.9, yaw: -Math.PI / 2 + 0.36 },
-  { key: 'board', label: 'กระดาน KPI', x: BOARD.x, z: BOARD.z + 5.2, yaw: 0 },
+  { key: 'console', label: 'ห้องควบคุม', x: CONSOLE.x, z: CONSOLE.z + 2.3, yaw: 0 },
+  ...Object.entries(BOARDS).map(([key, b]) => ({ key, label: b.label, x: b.x + Math.sin(b.rot) * 4.8, z: b.z + Math.cos(b.rot) * 4.8, yaw: b.rot })),
 ];
+type NearKey = Kind | 'console' | null;
 
 function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; phase: React.MutableRefObject<number> }) {
   const legL = useRef<THREE.Group>(null); const legR = useRef<THREE.Group>(null);
@@ -1001,8 +1027,8 @@ function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; pha
 }
 
 function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAim }: {
-  person: Person; warp: Warp; onMove: (x: number, z: number, yaw: number) => void; onNear: (kind: Kind | null) => void;
-  onAim: (hit: { pileId?: string; tokenId?: string }) => void;
+  person: Person; warp: Warp; onMove: (x: number, z: number, yaw: number) => void; onNear: (key: NearKey) => void;
+  onAim: (hit: { pileId?: string; tokenId?: string; console?: boolean }) => void;
   onInteract: () => void; onTogglePerson: () => void;
 }) {
   const camera = useThree((s) => s.camera);
@@ -1013,7 +1039,7 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
   const keys = useRef(new Set<string>());
   const moving = useRef(0); const phase = useRef(0);
   const avatar = useRef<THREE.Group>(null);
-  const near = useRef<Kind | null>(null);
+  const near = useRef<NearKey>(null);
   const cbs = useRef({ onMove, onNear, onInteract, onTogglePerson, onAim });
   cbs.current = { onMove, onNear, onInteract, onTogglePerson, onAim };
   const scene = useThree((st) => st.scene);
@@ -1049,8 +1075,8 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
       ray.setFromCamera(centre, camera);
       for (const hit of ray.intersectObjects(scene.children, true)) {
         let o: THREE.Object3D | null = hit.object;
-        while (o && !o.userData.pileId && !o.userData.tokenId) o = o.parent;
-        if (o) { cbs.current.onAim({ pileId: o.userData.pileId, tokenId: o.userData.tokenId }); return; }
+        while (o && !o.userData.pileId && !o.userData.tokenId && !o.userData.console) o = o.parent;
+        if (o) { cbs.current.onAim({ pileId: o.userData.pileId, tokenId: o.userData.tokenId, console: o.userData.console }); return; }
       }
     };
     document.addEventListener('mousedown', shoot);
@@ -1104,70 +1130,269 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
       camera.lookAt(p.x, p.y + 1.35 + pitch * 1.5, p.z);
     }
     cbs.current.onMove(p.x, p.z, yaw);
-    let nk: Kind | null = null;
+    let nk: NearKey = null;
     for (const kind of KINDS) if (Math.hypot(p.x - CRATE[kind].x, p.z - CRATE[kind].z) < 3.3) nk = kind;
+    if (Math.hypot(p.x - CONSOLE.x, p.z - CONSOLE.z) < 2.4) nk = 'console';
     if (nk !== near.current) { near.current = nk; cbs.current.onNear(nk); }
   });
   return <group ref={avatar} visible={false}><Worker moving={moving} phase={phase} /></group>;
 }
 
-// Wall screen with the key numbers, standing behind the line. Drawn into a canvas texture so the board is a
-// real 3D surface (hidden behind the gantry, readable from the side) instead of a DOM layer over the scene.
-function drawBoard(c: HTMLCanvasElement, kpi: Props['kpi'], font: string) {
-  const g = c.getContext('2d');
-  if (!g) return;
-  const W = c.width; const H = c.height;
+// ---- Report boards (canvas textures on real 3D panels) --------------------------------------------
+type BoardData = {
+  hourly: { h: number; good: number; defect: number }[];
+  alerts: { id: number; ts: string | null; level: string; title: string; detail: string | null; device_id: string | null }[];
+  alert_counts: { open: number; open_critical: number; today: number } | null;
+};
+type Draw = (g: CanvasRenderingContext2D, W: number, H: number, font: string) => void;
+const BW = 1024; const BH = 520;
+
+function fit(g: CanvasRenderingContext2D, text: string, max: number) {
+  if (g.measureText(text).width <= max) return text;
+  let t = text;
+  while (t.length > 1 && g.measureText(`${t}…`).width > max) t = t.slice(0, -1);
+  return `${t}…`;
+}
+function boardFrame(g: CanvasRenderingContext2D, W: number, H: number, font: string, title: string, sub: string, pill?: { text: string; ok: boolean | null }) {
   g.fillStyle = '#06140f'; g.fillRect(0, 0, W, H);
   g.textBaseline = 'alphabetic';
-  g.fillStyle = '#7ff7e0'; g.font = `900 44px ${font}`; g.fillText('KPI · LIVE', 36, 70);
-  g.fillStyle = '#9cc8b8'; g.font = `600 26px ${font}`; g.fillText(`${kpi.device ?? '-'} · ${kpi.model ?? '-'}`, 300, 68);
-  g.font = `800 26px ${font}`;
-  const pill = g.measureText(kpi.state).width + 32;
-  g.fillStyle = kpi.playing ? 'rgba(56,201,131,.3)' : 'rgba(232,66,58,.3)';
-  g.beginPath(); g.roundRect(W - 36 - pill, 34, pill, 46, 12); g.fill();
-  g.fillStyle = kpi.playing ? '#9ff5c8' : '#ffb3ab'; g.fillText(kpi.state, W - 20 - pill, 67);
-  const rate = Number(kpi.defectRate);
-  const cells: [string, string, string][] = [
-    ['Total', kpi.total.toLocaleString(), '#ffffff'], ['ดี', kpi.good.toLocaleString(), '#6ff2a8'], ['เสีย', kpi.defect.toLocaleString(), '#ffab6b'],
-    ['Defect rate', `${kpi.defectRate}%`, rate >= 30 ? '#ff8f7a' : rate >= 15 ? '#ffd27a' : '#ffffff'], ['ผล / นาที', String(kpi.epm), '#ffffff'], ['ช่วงเวลา', kpi.windowLabel, '#ffffff'],
-  ];
-  const cw = (W - 72 - 2 * 20) / 3; const ch = 170;
-  cells.forEach(([label, value, color], i) => {
-    const x = 36 + (i % 3) * (cw + 20); const y = 110 + Math.floor(i / 3) * (ch + 20);
-    g.fillStyle = 'rgba(127,247,224,.08)'; g.strokeStyle = 'rgba(127,247,224,.25)'; g.lineWidth = 2;
-    g.beginPath(); g.roundRect(x, y, cw, ch, 16); g.fill(); g.stroke();
-    g.fillStyle = '#9cc8b8'; g.font = `700 26px ${font}`; g.fillText(label, x + 22, y + 44);
-    g.fillStyle = color; g.font = `900 ${value.length > 7 ? 54 : 76}px ${font}`; g.fillText(value, x + 22, y + 135);
-  });
+  g.fillStyle = '#7ff7e0'; g.font = `900 42px ${font}`; g.fillText(title, 36, 68);
+  const tw = g.measureText(title).width;
+  g.fillStyle = '#9cc8b8'; g.font = `600 24px ${font}`; g.fillText(fit(g, sub, W - tw - 330), 56 + tw, 66);
+  if (pill) {
+    g.font = `800 26px ${font}`;
+    const pw = g.measureText(pill.text).width + 32;
+    g.fillStyle = pill.ok == null ? 'rgba(160,170,170,.25)' : pill.ok ? 'rgba(56,201,131,.3)' : 'rgba(232,66,58,.3)';
+    g.beginPath(); g.roundRect(W - 36 - pw, 32, pw, 46, 12); g.fill();
+    g.fillStyle = pill.ok == null ? '#cfd8d3' : pill.ok ? '#9ff5c8' : '#ffb3ab'; g.fillText(pill.text, W - 20 - pw, 65);
+  }
 }
-function KpiBoard({ kpi }: { kpi: Props['kpi'] }) {
-  const g = geo();
+
+function CanvasBoard({ b, draw, version }: { b: BoardDef; draw: Draw; version: string }) {
+  const g3 = geo();
   const { canvas, tex } = useMemo(() => {
-    const c = document.createElement('canvas'); c.width = 1024; c.height = 520;
+    const c = document.createElement('canvas'); c.width = BW; c.height = BH;
     const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
     return { canvas: c, tex: t };
   }, []);
   useEffect(() => () => tex.dispose(), [tex]);
-  const key = JSON.stringify(kpi);
+  const drawRef = useRef(draw); drawRef.current = draw;
   useEffect(() => {
     const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
-    const draw = () => { drawBoard(canvas, kpi, font); tex.needsUpdate = true; };
-    draw();
+    const paint = () => { const g = canvas.getContext('2d'); if (!g) return; drawRef.current(g, BW, BH, font); tex.needsUpdate = true; };
+    paint();
     let alive = true;
-    void document.fonts?.ready.then(() => { if (alive) draw(); });
+    void document.fonts?.ready.then(() => { if (alive) paint(); });
     return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, canvas, tex]);
-  const sh = (BOARD.w - 0.2) * (520 / 1024);
-  return <group position={[BOARD.x, 0, BOARD.z]}>
-    {[-1, 1].map((s) => <mesh key={s} geometry={g.box} position={[s * (BOARD.w / 2 - 0.2), BOARD.y / 2, -0.05]} scale={[0.18, BOARD.y, 0.18]} material={std('#3b4246', { metalness: 0.3, roughness: 0.5 })} castShadow />)}
-    <mesh geometry={g.box} position={[0, BOARD.y, -0.06]} scale={[BOARD.w, sh + 0.25, 0.12]} material={std('#1d2427', { roughness: 0.6 })} castShadow />
-    <mesh position={[0, BOARD.y, 0.005]}><planeGeometry args={[BOARD.w - 0.2, sh]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
+  }, [version, canvas, tex]);
+  const sh = (b.w - 0.2) * (BH / BW);
+  return <group position={[b.x, 0, b.z]} rotation={[0, b.rot, 0]}>
+    {[-1, 1].map((s) => <mesh key={s} geometry={g3.box} position={[s * (b.w / 2 - 0.2), b.y / 2, -0.05]} scale={[0.18, b.y, 0.18]} material={std('#3b4246', { metalness: 0.3, roughness: 0.5 })} castShadow />)}
+    <mesh geometry={g3.box} position={[0, b.y, -0.06]} scale={[b.w, sh + 0.25, 0.12]} material={std('#1d2427', { roughness: 0.6 })} castShadow />
+    <mesh position={[0, b.y, 0.005]}><planeGeometry args={[b.w - 0.2, sh]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
   </group>;
 }
 
+function KpiBoard({ kpi }: { kpi: Props['kpi'] }) {
+  const draw: Draw = (g, W, H, font) => {
+    boardFrame(g, W, H, font, 'KPI · LIVE', `${kpi.device ?? '-'} · ${kpi.model ?? '-'}`, { text: kpi.state, ok: kpi.playing });
+    const rate = Number(kpi.defectRate);
+    const cells: [string, string, string][] = [
+      ['Total', kpi.total.toLocaleString(), '#ffffff'], ['ดี', kpi.good.toLocaleString(), '#6ff2a8'], ['เสีย', kpi.defect.toLocaleString(), '#ffab6b'],
+      ['Defect rate', `${kpi.defectRate}%`, rate >= 30 ? '#ff8f7a' : rate >= 15 ? '#ffd27a' : '#ffffff'], ['ผล / นาที', String(kpi.epm), '#ffffff'], ['ช่วงเวลา', kpi.windowLabel, '#ffffff'],
+    ];
+    const cw = (W - 72 - 2 * 20) / 3; const ch = 170;
+    cells.forEach(([label, value, color], i) => {
+      const x = 36 + (i % 3) * (cw + 20); const y = 110 + Math.floor(i / 3) * (ch + 20);
+      g.fillStyle = 'rgba(127,247,224,.08)'; g.strokeStyle = 'rgba(127,247,224,.25)'; g.lineWidth = 2;
+      g.beginPath(); g.roundRect(x, y, cw, ch, 16); g.fill(); g.stroke();
+      g.fillStyle = '#9cc8b8'; g.font = `700 26px ${font}`; g.fillText(label, x + 22, y + 44);
+      g.fillStyle = color; g.font = `900 ${value.length > 7 ? 54 : 76}px ${font}`; g.fillText(value, x + 22, y + 135);
+    });
+  };
+  return <CanvasBoard b={BOARDS.kpi} draw={draw} version={JSON.stringify(kpi)} />;
+}
+
+function HourlyBoard({ data }: { data: BoardData | null }) {
+  const hours = data?.hourly ?? [];
+  const nowH = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', hourCycle: 'h23' }).format(new Date()));
+  const draw: Draw = (g, W, H, font) => {
+    const total = hours.reduce((a, b) => a + b.good + b.defect, 0);
+    const bad = hours.reduce((a, b) => a + b.defect, 0);
+    boardFrame(g, W, H, font, 'ผลไม้รายชั่วโมง', `วันนี้ ${total.toLocaleString()} ผล · เสีย ${total ? ((bad / total) * 100).toFixed(1) : '0.0'}%`);
+    const left = 70; const right = W - 30; const top = 110; const bottom = H - 60;
+    const max = Math.max(1, ...hours.map((b) => b.good + b.defect));
+    g.strokeStyle = 'rgba(127,247,224,.18)'; g.lineWidth = 2;
+    [0, 0.5, 1].forEach((f) => { const y = bottom - (bottom - top) * f; g.beginPath(); g.moveTo(left, y); g.lineTo(right, y); g.stroke(); });
+    g.fillStyle = '#9cc8b8'; g.font = `600 20px ${font}`; g.textAlign = 'right';
+    g.fillText(String(max), left - 10, top + 8); g.fillText(String(Math.round(max / 2)), left - 10, (top + bottom) / 2 + 8); g.fillText('0', left - 10, bottom + 8);
+    g.textAlign = 'center';
+    const slot = (right - left) / 24; const bw = slot * 0.7;
+    for (let h = 0; h < 24; h++) {
+      const b = hours[h] ?? { good: 0, defect: 0 };
+      const x = left + slot * h + (slot - bw) / 2;
+      const hg = ((bottom - top) * b.good) / max; const hd = ((bottom - top) * b.defect) / max;
+      if (h === nowH) { g.fillStyle = 'rgba(255,225,77,.12)'; g.fillRect(left + slot * h, top - 10, slot, bottom - top + 10); }
+      g.fillStyle = '#3dffb0'; g.fillRect(x, bottom - hg, bw, hg);
+      g.fillStyle = '#ffa043'; g.fillRect(x, bottom - hg - hd, bw, hd);
+      if (h % 3 === 0) { g.fillStyle = h === nowH ? '#ffe14d' : '#9cc8b8'; g.font = `700 20px ${font}`; g.fillText(`${String(h).padStart(2, '0')}:00`, left + slot * h + slot / 2, bottom + 34); }
+    }
+    g.textAlign = 'left';
+    if (!data) { g.fillStyle = '#9cc8b8'; g.font = `700 28px ${font}`; g.fillText('กำลังโหลด...', left + 20, (top + bottom) / 2); }
+  };
+  return <CanvasBoard b={BOARDS.hourly} draw={draw} version={JSON.stringify([hours, nowH, !!data])} />;
+}
+
+function ParetoBoard({ crates }: { crates: Props['crates'] }) {
+  const rows = [...crates.byDefect].sort((a, b) => b.n - a.n);
+  const draw: Draw = (g, W, H, font) => {
+    const total = rows.reduce((a, r) => a + r.n, 0);
+    boardFrame(g, W, H, font, 'ชนิดที่เสีย', `ช่วง ${crates.windowLabel} · ${total.toLocaleString()} ผล`);
+    if (!rows.length) { g.fillStyle = '#6ff2a8'; g.font = `800 40px ${font}`; g.fillText('ยังไม่มีผลเสียในช่วงนี้', 60, 290); return; }
+    const max = Math.max(1, ...rows.map((r) => r.n));
+    const rowH = Math.min(92, (H - 140) / rows.length);
+    rows.slice(0, 5).forEach((r, i) => {
+      const y = 120 + i * rowH;
+      const name = DEFECT_TH[r.defect_type] ?? r.defect_type;
+      g.fillStyle = '#e6fffb'; g.font = `800 32px ${font}`; g.fillText(name, 40, y + 40);
+      g.fillStyle = '#7f9c93'; g.font = `600 20px ${font}`; g.fillText(r.defect_type, 40, y + 66);
+      const x0 = 230; const wMax = W - x0 - 210;
+      g.fillStyle = 'rgba(255,160,67,.15)'; g.beginPath(); g.roundRect(x0, y + 14, wMax, 44, 10); g.fill();
+      g.fillStyle = '#ffa043'; g.beginPath(); g.roundRect(x0, y + 14, Math.max(8, (wMax * r.n) / max), 44, 10); g.fill();
+      g.fillStyle = '#ffffff'; g.font = `900 34px ${font}`; g.fillText(r.n.toLocaleString(), W - 190, y + 48);
+      g.fillStyle = '#ffd2a8'; g.font = `700 24px ${font}`; g.fillText(`${((r.n / total) * 100).toFixed(0)}%`, W - 90, y + 47);
+    });
+  };
+  return <CanvasBoard b={BOARDS.pareto} draw={draw} version={JSON.stringify([rows, crates.windowLabel])} />;
+}
+
+const levelTh = (l: string) => (l === 'critical' ? 'วิกฤต' : l === 'warning' ? 'เตือน' : l);
+function AlertBoard({ data }: { data: BoardData | null }) {
+  const list = data?.alerts ?? []; const c = data?.alert_counts;
+  const draw: Draw = (g, W, H, font) => {
+    boardFrame(g, W, H, font, 'ALERT', c ? `ค้าง ${c.open} · วิกฤต ${c.open_critical} · วันนี้ ${c.today}` : 'กำลังโหลด...', c ? { text: c.open ? `ค้าง ${c.open}` : 'ปกติ', ok: c.open === 0 } : undefined);
+    if (data && !list.length) {
+      g.fillStyle = '#6ff2a8'; g.font = `900 54px ${font}`; g.fillText('ปกติ · ไม่มี alert ค้าง', 50, 280);
+      g.fillStyle = '#9cc8b8'; g.font = `600 26px ${font}`; g.fillText(`วันนี้เกิด alert ${c?.today ?? 0} ครั้ง`, 52, 330);
+      return;
+    }
+    list.slice(0, 4).forEach((a, i) => {
+      const y = 104 + i * 100;
+      const crit = a.level === 'critical';
+      g.fillStyle = crit ? 'rgba(255,59,47,.18)' : 'rgba(255,155,47,.15)'; g.beginPath(); g.roundRect(30, y, W - 60, 88, 12); g.fill();
+      g.fillStyle = crit ? '#ff6a5f' : '#ffb04f'; g.beginPath(); g.roundRect(30, y, 10, 88, 5); g.fill();
+      g.font = `800 22px ${font}`; g.fillText(levelTh(a.level), 58, y + 34);
+      g.fillStyle = '#9cc8b8'; g.font = `600 22px ${font}`; g.fillText(a.ts ? pickTime(a.ts) : '-', 58, y + 68);
+      g.fillStyle = '#ffffff'; g.font = `800 30px ${font}`; g.fillText(fit(g, a.title, W - 260), 200, y + 38);
+      g.fillStyle = '#b9d3c9'; g.font = `600 22px ${font}`; g.fillText(fit(g, `${a.device_id ?? ''} ${a.detail ?? ''}`.trim(), W - 260), 200, y + 70);
+    });
+  };
+  return <CanvasBoard b={BOARDS.alerts} draw={draw} version={JSON.stringify([list, c, !!data])} />;
+}
+
+function SystemBoard({ system }: { system: Props['system'] }) {
+  const draw: Draw = (g, W, H, font) => {
+    const ok = system.db === 'online' && system.mqtt === 'online';
+    boardFrame(g, W, H, font, 'สุขภาพระบบ', 'MQTT · DB · ความหน่วง', { text: ok ? 'ปกติ' : 'มีปัญหา', ok });
+    const state = (v: string): [string, string] => (v === 'online' ? ['Online', '#6ff2a8'] : v === 'offline' ? ['Offline', '#ff8f7a'] : ['ไม่ทราบ', '#cfd8d3']);
+    const sec = (v: number | null, warn: number, bad: number): [string, string] => (v == null ? ['-', '#cfd8d3'] : [`${v.toFixed(1)} วิ`, v <= warn ? '#6ff2a8' : v <= bad ? '#ffd27a' : '#ff8f7a']);
+    const rows: [string, [string, string]][] = [
+      ['MQTT', state(system.mqtt)], ['Database', state(system.db)], ['Internet', state(system.internet)],
+      ['Heartbeat ล่าสุด', system.heartbeatAge == null ? ['-', '#cfd8d3'] : [`${system.heartbeatAge} วิที่แล้ว`, system.heartbeatAge <= 10 ? '#6ff2a8' : system.heartbeatAge <= 60 ? '#ffd27a' : '#ff8f7a']],
+      ['CIRA → DB (เฉลี่ย)', sec(system.ingestAvg, 3, 6)], ['DB → จอ', sec(system.dbToScreen, 3, 6)],
+      ['event ล่าสุด', system.lastEventAgo == null ? ['-', '#cfd8d3'] : [`${system.lastEventAgo} วิที่แล้ว`, '#e6fffb']],
+    ];
+    const colW = (W - 90) / 2;
+    rows.forEach(([label, [value, color]], i) => {
+      const x = 36 + (i % 2) * (colW + 18); const y = 104 + Math.floor(i / 2) * 98;
+      g.fillStyle = 'rgba(127,247,224,.07)'; g.beginPath(); g.roundRect(x, y, colW, 84, 12); g.fill();
+      g.fillStyle = '#9cc8b8'; g.font = `700 24px ${font}`; g.fillText(label, x + 20, y + 34);
+      g.fillStyle = color; g.font = `900 34px ${font}`; g.fillText(value, x + 20, y + 72);
+    });
+  };
+  return <CanvasBoard b={BOARDS.system} draw={draw} version={JSON.stringify(system)} />;
+}
+
+// Operator console: shows the machine state and the web pause / resume button (admin only, confirmed).
+const MACHINE: Record<Props['control']['machine'], [string, string]> = {
+  running: ['กำลังทำงาน', '#38f59a'], paused: ['หยุดจากเว็บ', '#ffd21f'], stopped: ['เครื่องหยุด', '#ff4a3d'], loading: ['กำลังโหลด', '#9aa7a0'],
+};
+function ControlConsole({ control, onPress }: { control: Props['control']; onPress: () => void }) {
+  const g3 = geo();
+  const gl = useThree((st) => st.gl);
+  const [label, color] = MACHINE[control.machine];
+  const lamp = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false }), [color]);
+  const btn = useMemo(() => new THREE.MeshStandardMaterial({ color: '#888', emissive: new THREE.Color('#000'), roughness: 0.35 }), []);
+  useEffect(() => () => { lamp.dispose(); btn.dispose(); }, [lamp, btn]);
+  const canPress = control.isAdmin && control.known && !control.busy;
+  const btnColor = !control.isAdmin || !control.known ? '#7a8580' : control.paused ? '#2fc46f' : '#e5453a';
+  useFrame(({ clock }) => {
+    btn.color.set(btnColor); btn.emissive.set(btnColor);
+    btn.emissiveIntensity = canPress ? 0.35 + 0.25 * Math.sin(clock.elapsedTime * 4) : 0.05;
+  });
+  const { canvas, tex } = useMemo(() => {
+    const c = document.createElement('canvas'); c.width = 768; c.height = 300;
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+    return { canvas: c, tex: t };
+  }, []);
+  useEffect(() => () => tex.dispose(), [tex]);
+  useEffect(() => {
+    const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
+    const paint = () => {
+      const g = canvas.getContext('2d'); if (!g) return;
+      g.fillStyle = '#071a14'; g.fillRect(0, 0, 768, 300);
+      g.fillStyle = '#7ff7e0'; g.font = `900 34px ${font}`; g.fillText('CONTROL · ' + (control.device ?? '-'), 28, 52);
+      g.fillStyle = color; g.font = `900 56px ${font}`; g.fillText(label, 28, 130);
+      g.fillStyle = '#b9d3c9'; g.font = `700 26px ${font}`;
+      const hint = !control.isAdmin ? 'ปุ่มนี้ใช้ได้เฉพาะ admin' : !control.known ? 'กำลังอ่านคำสั่งล่าสุด...' : control.busy ? 'กำลังส่งคำสั่ง...'
+        : control.waiting ? 'รอ CORE รับคำสั่ง...' : control.paused ? 'กดปุ่มเขียว = สั่งทำงานต่อ' : 'กดปุ่มแดง = สั่งหยุดจากเว็บ';
+      g.fillText(hint, 28, 190);
+      g.fillStyle = '#7f9c93'; g.font = `600 20px ${font}`; g.fillText('หยุดแค่การส่งผลจาก flow · กล้อง/AI ใน CORE ยังเปิดอยู่', 28, 240);
+      if (control.err) { g.fillStyle = '#ff8f7a'; g.font = `700 22px ${font}`; g.fillText(control.err, 28, 280); }
+      tex.needsUpdate = true;
+    };
+    paint();
+    void document.fonts?.ready.then(paint);
+  }, [canvas, tex, control.device, control.isAdmin, control.known, control.busy, control.waiting, control.paused, control.err, label, color]);
+  const press = (e: ThreeEvent<MouseEvent>) => { e.stopPropagation(); onPress(); };
+  return <group position={[CONSOLE.x, 0, CONSOLE.z]}>
+    <mesh geometry={g3.box} position={[0, 0.5, 0]} scale={[2.6, 1.0, 0.9]} material={std('#2b3236', { roughness: 0.5 })} castShadow receiveShadow />
+    <group position={[0, 1.08, 0.05]} rotation={[0.55, 0, 0]}>
+      <mesh geometry={g3.box} scale={[2.6, 0.06, 1.0]} material={std('#1d2427', { roughness: 0.4 })} castShadow />
+      <mesh position={[-0.35, 0.035, 0]} rotation={[-Math.PI / 2, 0, 0]}><planeGeometry args={[1.7, 0.66]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
+      <group position={[0.85, 0.06, 0]} userData={{ console: true }} onClick={press}
+        onPointerOver={(e) => { e.stopPropagation(); gl.domElement.style.cursor = canPress ? 'pointer' : 'not-allowed'; }} onPointerOut={() => { gl.domElement.style.cursor = ''; }}>
+        <mesh position={[0, 0.02, 0]}><cylinderGeometry args={[0.26, 0.3, 0.06, 24]} /><meshStandardMaterial color="#ffd21f" /></mesh>
+        <mesh position={[0, 0.1, 0]} material={btn}><cylinderGeometry args={[0.2, 0.22, 0.12, 24]} /></mesh>
+      </group>
+    </group>
+    <mesh position={[1.15, 1.3, -0.35]}><cylinderGeometry args={[0.04, 0.04, 1.0, 8]} /><meshStandardMaterial color="#cfd8d3" /></mesh>
+    <mesh position={[1.15, 1.86, -0.35]} material={lamp}><sphereGeometry args={[0.13, 14, 10]} /></mesh>
+    <pointLight position={[1.15, 1.9, -0.1]} color={color} intensity={3} distance={3} />
+  </group>;
+}
+
+function useBoardData() {
+  const [data, setData] = useState<BoardData | null>(null);
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const r = await fetch('/api/live/boards', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json() as BoardData;
+        if (active) setData(j);
+      } catch { /* keep last */ }
+    };
+    void load();
+    const id = window.setInterval(() => { if (!document.hidden) void load(); }, 20000);
+    return () => { active = false; window.clearInterval(id); };
+  }, []);
+  return data;
+}
+
 // Top-down map of the line; the player marker is moved directly (no re-render per frame).
-function MiniMap({ markerRef }: { markerRef: React.MutableRefObject<SVGGElement | null> }) {
+function MiniMap({ markerRef, alert }: { markerRef: React.MutableRefObject<SVGGElement | null>; alert: Props['alert'] }) {
   const line = (a: THREE.Vector3, b: THREE.Vector3, cls: string, key: string) => <line key={key} x1={a.x} y1={a.z} x2={b.x} y2={b.z} className={cls} />;
   return <svg className="lv3d-map" viewBox="-17 -11 34 22" aria-hidden="true">
     <rect x={-17} y={-11} width={34} height={22} className="bg" />
@@ -1175,7 +1400,9 @@ function MiniMap({ markerRef }: { markerRef: React.MutableRefObject<SVGGElement 
     {KINDS.map((k) => line(FORK, END[k], `belt ${k}`, k))}
     {KINDS.map((k) => <rect key={`c${k}`} x={CRATE[k].x - 1} y={CRATE[k].z - 0.75} width={2} height={1.5} className={`crate ${k}`} transform={`rotate(${-crateAngle(k) * 180 / Math.PI} ${CRATE[k].x} ${CRATE[k].z})`} />)}
     <rect x={CAM.x - 0.3} y={-1.4} width={0.6} height={2.8} className="gantry" />
-    <line x1={BOARD.x - BOARD.w / 2} y1={BOARD.z} x2={BOARD.x + BOARD.w / 2} y2={BOARD.z} className="board" />
+    {Object.entries(BOARDS).map(([k, b]) => { const e = boardEnds(b); return <line key={k} x1={e.x1} y1={e.z1} x2={e.x2} y2={e.z2} className="board" />; })}
+    <rect x={CONSOLE.x - 1.3} y={CONSOLE.z - 0.45} width={2.6} height={0.9} className="console" />
+    {alert && <circle cx={SIREN_AT.x} cy={SIREN_AT.z} r={1.6} className={`alert ${alert}`} />}
     {TREES.map((t, i) => <circle key={i} cx={t.x} cy={t.z} r={0.9 * t.s} className="tree" />)}
     <g ref={markerRef}><path d="M0 -1.1 L0.75 0.8 L0 0.35 L-0.75 0.8 Z" className="me" /></g>
   </svg>;
@@ -1292,7 +1519,10 @@ export default function LiveScene3D(props: Props) {
   const [person, setPerson] = useState<Person>('first');
   const [warp, setWarp] = useState<Warp>({ ...WARPS[0], n: 0 });
   const [locked, setLocked] = useState(false);
-  const [near, setNear] = useState<Kind | null>(null);
+  const [near, setNear] = useState<NearKey>(null);
+  const boardData = useBoardData();
+  const [toast, setToast] = useState('');
+  useEffect(() => { if (!toast) return; const id = window.setTimeout(() => setToast(''), 3500); return () => window.clearTimeout(id); }, [toast]);
   const nearRef = useRef(near); nearRef.current = near;
   const [crateOpen, setCrateOpen] = useState<Kind | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -1331,10 +1561,23 @@ export default function LiveScene3D(props: Props) {
   }, [walk]);
   const enterWalk = () => { setPick(null); setCrateOpen(null); setWalk(true); setWarp((w) => ({ ...WARPS[0], n: w.n + 1 })); };
   const exitWalk = () => { unlockMouse(); setWalk(false); setNear(null); setCam((c) => ({ key: 'overview', nonce: c.nonce + 1 })); };
-  const interact = () => { const k = nearRef.current; if (!k) return; unlockMouse(); setCrateOpen(k); };
+  // console button: same pause / resume as the header (admin + confirm dialog in SimulateView)
+  const pressConsole = () => {
+    const c = props.control;
+    if (!c.isAdmin) { setToast('ปุ่มหยุด/ทำงานต่อใช้ได้เฉพาะ admin'); return; }
+    if (!c.known || c.busy) return;
+    unlockMouse();
+    c.send(c.paused);
+  };
+  const interact = () => {
+    const k = nearRef.current; if (!k) return;
+    if (k === 'console') { pressConsole(); return; }
+    unlockMouse(); setCrateOpen(k);
+  };
   const pileIndex = useRef(new Map<string, Piled>());
   const onPile = (p: Piled) => setPick({ token: p.token ?? { id: p.id, kind: p.kind, fruit: p.fruit, count: 1, conf: null, defectType: p.defectType, track: null, spawnedAt: 0, seed: true }, landed: true, follow: false });
-  const onAim = (hit: { pileId?: string; tokenId?: string }) => {
+  const onAim = (hit: { pileId?: string; tokenId?: string; console?: boolean }) => {
+    if (hit.console) { pressConsole(); return; }
     const p = hit.pileId ? pileIndex.current.get(hit.pileId) : undefined;
     if (p) { onPile(p); return; }
     const t = hit.tokenId ? props.tokens.find((x) => x.id === hit.tokenId) : undefined;
@@ -1382,7 +1625,7 @@ export default function LiveScene3D(props: Props) {
     <Canvas className="lv3d-canvas" shadows dpr={[1, q.dpr]} camera={{ position: PRESETS.overview.pos, fov: 36 }} gl={{ antialias: true, powerPreference: 'high-performance' }}
       onPointerMissed={() => { if (!walk) setPick(null); }}>
       <PerformanceMonitor onDecline={decline} flipflops={3} />
-      <Line {...props} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
+      <Line {...props} boardData={boardData} onConsole={pressConsole} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
       {walk
         ? <Walker person={person} warp={warp} onMove={onMove} onNear={setNear} onInteract={interact} onTogglePerson={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))} onAim={onAim} />
         : <>
@@ -1404,11 +1647,14 @@ export default function LiveScene3D(props: Props) {
     </div>}
     {walk && <>
       <div className="lv3d-cams" role="group" aria-label="วาร์ป">
-        {WARPS.map((w) => <button key={w.key} type="button" onClick={() => setWarp((cur) => ({ ...w, n: cur.n + 1 }))}>{w.label}</button>)}
+        <select aria-label="วาร์ปไป" value="" onChange={(e) => { const w = WARPS.find((x) => x.key === e.target.value); if (w) setWarp((cur) => ({ ...w, n: cur.n + 1 })); e.currentTarget.blur(); }}>
+          <option value="">วาร์ปไป...</option>
+          {WARPS.map((w) => <option key={w.key} value={w.key}>{w.label}</option>)}
+        </select>
         <button type="button" onClick={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))}>{person === 'first' ? 'มุมบุคคลที่ 3' : 'มุมบุคคลที่ 1'}</button>
         <button type="button" className="exit" onClick={exitWalk}>ออกจากโหมดเดิน</button>
       </div>
-      <MiniMap markerRef={marker} />
+      <MiniMap markerRef={marker} alert={props.alert} />
       {locked && person === 'first' && <div className="lv3d-cross" />}
       {!locked && !crateOpen && !altHeld && <div className="lv3d-walk-help">
         <b>โหมดเดินสำรวจ</b>
@@ -1420,13 +1666,16 @@ export default function LiveScene3D(props: Props) {
           <li><kbd>E</kbd> ดูข้อมูลตะกร้าเมื่ออยู่ใกล้ · กด <kbd>Alt</kbd> ค้างไว้ให้เมาส์โผล่ · <kbd>Esc</kbd> ปล่อยเมาส์</li>
         </ul>
       </div>}
-      {near && !crateOpen && <div className="lv3d-prompt">กด <kbd>E</kbd> ดูข้อมูล{near === 'good' ? 'ตะกร้าดี' : 'ตะกร้าเสีย'}</div>}
+      {near && !crateOpen && <div className="lv3d-prompt">{near === 'console'
+        ? (props.control.isAdmin ? <>กด <kbd>E</kbd> {props.control.paused ? 'สั่งทำงานต่อ' : 'สั่งหยุดจากเว็บ'} (มีหน้ายืนยัน)</> : 'ห้องควบคุม · ปุ่มใช้ได้เฉพาะ admin')
+        : <>กด <kbd>E</kbd> ดูข้อมูล{near === 'good' ? 'ตะกร้าดี' : 'ตะกร้าเสีย'}</>}</div>}
     </>}
 
     <div className="lv3d-opts">
       <span className="lv3d-clock" title="แสงในฉากเปลี่ยนตามเวลาไทย"><DayIcon size={12} />{env.label} {env.clock}</span>
       {autoDown && <em className="lv3d-auto" title="เครื่องกระตุก ปิดเงาและแสงเรืองชั่วคราว">กราฟิกลดอัตโนมัติ</em>}
     </div>
+    {toast && <div className="lv3d-toast">{toast}</div>}
     {crateOpen && <CratePanel kind={crateOpen} count={props.bins[crateOpen]} crates={props.crates} recent={recent[crateOpen]} onClose={() => setCrateOpen(null)} />}
 
     {pt && <div className={`lv3d-pick ${pt.kind}`}>
