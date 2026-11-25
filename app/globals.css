@@ -799,3 +799,37 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 .lv3d-map .truck { fill: #f3f1ea; }
 .lv3d-map .deck { fill: rgba(184,141,94,.7); }
 .lv3d-map .cat { fill: #ff9a6a; stroke: #fff; stroke-width: .15; }
+
+/* Live 3D: time menu, emergency drills, team figures */
+.lv3d-time { border: 1px solid rgba(13,124,108,.25); border-radius: 7px; background: #fff; padding: 2px 4px; font: 700 11px var(--font-thai), sans-serif; color: #2c4a3e; cursor: pointer; }
+.lv3d-cams button.drill { background: #3a2a10; color: #ffd27a; }
+.lv3d-cams button.drill.on { background: #e5453a; color: #fff; animation: lv3dDrill 1s steps(2) infinite; }
+@keyframes lv3dDrill { 50% { background: #7a1a14; } }
+.lv3d-emerg { position: absolute; left: 50%; top: 2.5%; z-index: 9; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; max-width: 86%; padding: 8px 10px 8px 14px; border-radius: 12px; background: rgba(20,8,6,.88); border: 2px solid var(--c); color: #fff; font-size: 12px; box-shadow: 0 0 22px var(--c); }
+.lv3d-emerg b { color: var(--c); font-size: 14px; white-space: nowrap; }
+.lv3d-emerg span { color: #f1d9d3; line-height: 1.4; }
+.lv3d-emerg button { border: 0; border-radius: 8px; padding: 6px 12px; background: #fff; color: #7a1a14; font: 900 12px var(--font-thai), sans-serif; cursor: pointer; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .lv3d-cams button.drill.on { animation: none; } }
+.lv3d-test { position: absolute; left: 50%; top: 50%; z-index: 10; transform: translate(-50%, -50%); width: min(380px, 90%); padding: 12px; border-radius: 14px; background: rgba(8,20,16,.94); color: #e8f5ef; box-shadow: 0 12px 34px rgba(0,0,0,.4); display: flex; flex-direction: column; gap: 6px; }
+.lv3d-test .lv3d-pick-head span { color: #9cc8b8; font-size: 11px; }
+.lv3d-test .lv3d-pick-head button { margin-left: auto; border: 0; background: transparent; color: #cfd8d3; cursor: pointer; }
+.lv3d-test > button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; border: 1px solid rgba(255,255,255,.12); border-left: 5px solid var(--c); border-radius: 9px; padding: 7px 10px; background: rgba(255,255,255,.05); color: #fff; font: 600 11px var(--font-thai), sans-serif; cursor: pointer; }
+.lv3d-test > button b { font-size: 13px; color: var(--c); }
+.lv3d-test > button span { color: #b9d3c9; }
+.lv3d-test > button:hover, .lv3d-test > button.on { background: rgba(255,255,255,.14); }
+.lv3d-test > button.stop { border-left-color: #fff; align-items: center; font-weight: 900; }
+.lv3d-member { display: flex; align-items: center; gap: 5px; padding: 2px 8px 2px 2px; border-radius: 999px; background: rgba(255,255,255,.92); border: 2px solid var(--c); color: #24352d; font: 800 11px var(--font-thai), sans-serif; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+.lv3d-member b { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--c); color: #fff; font-size: 11px; }
+.lv3d-team { position: absolute; right: 1.2%; top: 50%; z-index: 9; transform: translateY(-50%); width: min(300px, 86%); padding: 14px 16px; border-radius: 16px; background: #fff; border: 3px solid var(--c); color: #1d2b25; box-shadow: 0 12px 34px rgba(0,0,0,.3); display: flex; flex-direction: column; gap: 2px; }
+.lv3d-team-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.lv3d-team-head i { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--c); color: #fff; font: 900 18px var(--font-thai), sans-serif; font-style: normal; }
+.lv3d-team-head span { color: #7a8a82; font-weight: 800; font-size: 11px; letter-spacing: .05em; }
+.lv3d-team-head button { margin-left: auto; border: 0; background: transparent; color: #7a8a82; cursor: pointer; }
+.lv3d-team small { color: #8a978f; font-size: 10px; font-weight: 700; margin-top: 6px; }
+.lv3d-team strong { font-size: 19px; font-weight: 900; border-bottom: 2px solid #1d2b25; padding-bottom: 6px; }
+.lv3d-team > b { color: #18a058; font-size: 14px; font-weight: 900; }
+.lv3d-team p { margin: 4px 0 6px; color: #4f5f57; font-size: 12px; line-height: 1.5; }
+.lv3d-team em { border-top: 1px solid #e6ece8; padding-top: 6px; color: #8a978f; font-size: 10px; font-style: normal; }
+.lv3d-map .dog { fill: #d8a465; stroke: #fff; stroke-width: .15; }
+.lv3d-map .member { stroke: #fff; stroke-width: .12; }
+.lv3d-map .test { fill: #f2c230; }

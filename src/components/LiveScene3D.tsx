@@ -136,7 +136,7 @@ const DAY_KEYS: [number, string, string, string, number, string, number, number]
   [5, '#0b1724', '#6a80b4', '#101a2a', 0.6, '#a9bbff', 0.75, 1],
   [6.5, '#f1cba6', '#ffd6ad', '#a89682', 0.75, '#ffb878', 1.5, 0.35],
   [8, '#e7f1eb', '#ffffff', '#cfe3d6', 1.1, '#fff6e8', 2.6, 0],
-  [16.5, '#e7f1eb', '#ffffff', '#cfe3d6', 1.1, '#fff6e8', 2.6, 0],
+  [16, '#e7f1eb', '#ffffff', '#cfe3d6', 1.1, '#fff6e8', 2.6, 0],
   [18, '#f6b98c', '#ffc893', '#9a7a66', 0.8, '#ff9446', 1.9, 0.25],
   [19.5, '#2b2442', '#8a7ab0', '#19142a', 0.45, '#ff8a5a', 0.65, 0.75],
   [21, '#0b1724', '#6a80b4', '#101a2a', 0.6, '#a9bbff', 0.75, 1],
@@ -160,8 +160,8 @@ function envAt(hour: number, tv: boolean): Env {
   const isDay = hour >= 6 && hour <= 18.5;
   const ang = dayT * Math.PI;
   const sunPos: [number, number, number] = isDay ? [-Math.cos(ang) * 13, Math.max(3, Math.sin(ang) * 13), 7] : [6, 12, -5];
-  const label = hour < 5 ? 'กลางคืน' : hour < 6.5 ? 'เช้ามืด' : hour < 8 ? 'เช้า' : hour < 16.5 ? 'กลางวัน' : hour < 18.5 ? 'เย็น' : hour < 19.5 ? 'พลบค่ำ' : 'กลางคืน';
-  const icon = hour < 5 || hour >= 19.5 ? 'moon' : hour < 8 ? 'rise' : hour < 16.5 ? 'sun' : 'set';
+  const label = hour < 5 ? 'กลางคืน' : hour < 6.5 ? 'เช้ามืด' : hour < 8 ? 'เช้า' : hour < 11 ? 'สาย' : hour < 13 ? 'เที่ยง' : hour < 16 ? 'บ่าย' : hour < 18.5 ? 'เย็น' : hour < 19.5 ? 'พลบค่ำ' : 'กลางคืน';
+  const icon = hour < 5 || hour >= 19.5 ? 'moon' : hour < 8 ? 'rise' : hour < 16 ? 'sun' : 'set';
   const hh = Math.floor(hour); const mm = Math.floor((hour - hh) * 60);
   return {
     sky, hemiSky: mix(a[2], b[2], t), hemiGround: mix(a[3], b[3], t), hemiI,
@@ -435,7 +435,7 @@ function Belt({ from, to, width, strip, speed, trim = [], lift = 0 }: {
 }
 
 const LENS_Y = 2.08; // bottom of the camera lens (apex of the scan cone)
-function Gantry({ beam, cone, head, scan, reduced }: { beam: THREE.Material; cone: THREE.MeshBasicMaterial; head: THREE.MeshStandardMaterial; scan: React.MutableRefObject<ScanState>; reduced: boolean }) {
+function Gantry({ beam, cone, head, scan, reduced, fault }: { beam: THREE.Material; cone: THREE.MeshBasicMaterial; head: THREE.MeshStandardMaterial; scan: React.MutableRefObject<ScanState>; reduced: boolean; fault: boolean }) {
   const laser = useRef<THREE.Group>(null);
   const lineMat = useMemo(() => new THREE.MeshBasicMaterial({ color: '#4dffe0', toneMapped: false, transparent: true, opacity: 0.95 }), []);
   const fanMat = useMemo(() => new THREE.MeshBasicMaterial({ color: '#4dffe0', toneMapped: false, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }), []);
@@ -462,6 +462,9 @@ function Gantry({ beam, cone, head, scan, reduced }: { beam: THREE.Material; con
     cone.opacity = 0.08 + s.active * 0.2;
     // status LED: red on a defect verdict, cyan while scanning, slow green blink when idle
     led.color.set(flashRed ? '#ff2a22' : s.active > 0.3 ? '#4dffe0' : (reduced || Math.sin(t * 2.4) > -0.6) ? '#38f59a' : '#0d3a22');
+    // camera-fault drill: status LED and scan cone blink red
+    if (fault) { const on = reduced || Math.sin(t * 10) > 0; led.color.set(on ? '#ff2a22' : '#3a0a08'); cone.color.set(on ? '#ff3b2f' : '#5ff7dc'); }
+    else cone.color.set('#5ff7dc');
   });
   const g = geo();
   const body = std('#2b3136', { metalness: 0.55, roughness: 0.38 });
@@ -782,11 +785,14 @@ function CrateLabel({ kind, count, last, hit, fill, swapping }: { kind: Kind; co
 }
 
 // ---- Scene --------------------------------------------------------------------------------------
-type LineProps = Props & { meowKey: number; onCat: () => void; catMarker: React.MutableRefObject<SVGCircleElement | null>; boardData: BoardData | null; onConsole: () => void; env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
+type LineProps = Props & { fun: Fun; boardData: BoardData | null; onConsole: () => void; env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
 
-function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, crates, system, control, meowKey, onCat, catMarker, boardData, onConsole, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
+function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, crates, system, control, fun, boardData, onConsole, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
   const speed = useRef(0);
   const power = useRef(0);
+  const emDef = fun.emerg ? EMERG[fun.emerg] : null;
+  const dim = fun.emerg === 'power' ? 0.3 : 1; // power-cut drill: daylight through the openings only
+  const dimRef = useRef(dim); dimRef.current = dim;
   const scan = useRef<ScanState>({ active: 0, x: CAM.x, defect: false, flash: 0, flashDefect: false });
   const powerKick = useRef(-1e9);
   const modelKick = useRef(-1e9);
@@ -921,13 +927,13 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     }
     scan.current.active += ((active ? 1 : 0) - scan.current.active) * (1 - Math.exp(-dt * 10));
     scan.current.flash = flashK; scan.current.flashDefect = flashDefect;
-    if (keyLight.current) keyLight.current.intensity = env.sunI * (0.5 + 0.5 * Math.min(1, pw));
+    if (keyLight.current) keyLight.current.intensity = env.sunI * (0.5 + 0.5 * Math.min(1, pw)) * dimRef.current;
   });
 
   return <>
     <color attach="background" args={[env.sky]} />
     <fog attach="fog" args={[env.sky, 30, 140]} />
-    <hemisphereLight color={env.hemiSky} groundColor={env.hemiGround} intensity={env.hemiI} />
+    <hemisphereLight color={env.hemiSky} groundColor={env.hemiGround} intensity={env.hemiI * dim} />
     <directionalLight ref={keyLight} position={env.sunPos} color={env.sun} intensity={env.sunI} castShadow={q.shadows}
       shadow-camera-left={-14} shadow-camera-right={14} shadow-camera-top={9} shadow-camera-bottom={-9} shadow-bias={-0.0004} />
     {q.stars > 0 && env.night > 0.5 && <Stars radius={70} depth={25} count={q.stars} factor={3} saturation={0} fade speed={reduced ? 0 : 0.4} />}
@@ -943,21 +949,27 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     </mesh>
     <Grid position={[(SHED.x0 + SHED.x1) / 2, 0.02, (SHED.z0 + SHED.z1) / 2]} args={[SHED.x1 - SHED.x0, SHED.z1 - SHED.z0]} cellSize={1} cellThickness={0.5} sectionSize={5} sectionThickness={1}
       cellColor={env.cell} sectionColor={env.section} fadeDistance={60} fadeStrength={1} />
-    <Warehouse />
+    <Warehouse lampsOn={fun.emerg !== 'power'} />
     <Scenery env={env} lite={q === QUALITY.low} reduced={reduced} />
     <FeedLine speed={speed} reduced={reduced} />
-    <Cat meowKey={meowKey} onCat={onCat} reduced={reduced} marker={catMarker} />
+    <Cat callKey={fun.meowKey} onCall={() => fun.onPet('cat')} reduced={reduced} marker={fun.marks.cat} />
+    <Dog callKey={fun.barkKey} onCall={() => fun.onPet('dog')} reduced={reduced} marker={fun.marks.dog} />
+    {TEAM.map((m, i) => <TeamMember key={m.letter} m={m} i={i} talking={fun.talk === i} onTeam={fun.onTeam} />)}
+    <EmergencyPanel active={fun.emerg} onPress={fun.onEmerg} />
+    {emDef && <EmergencyBeacons color={emDef.color} reduced={reduced} withLight={q.waveLight} />}
+    {fun.emerg === 'fire' && <Fire reduced={reduced} />}
+    {fun.emerg === 'jam' && <JamWarning reduced={reduced} />}
 
     <Belt from={new THREE.Vector3(START.x - 0.6, 0, 0)} to={new THREE.Vector3(FORK.x + 0.4, 0, 0)} width={1.4} strip={mats.green} speed={speed} trim={[{ side: -1, end: 0.55 }, { side: 1, end: 0.55 }]} />
     <Belt from={new THREE.Vector3(FORK.x, 0, -0.1)} to={END.good.clone().add(dirOf('good').multiplyScalar(0.35))} width={1.3} strip={mats.green} speed={speed} trim={[{ side: 1, start: 2.1 }]} />
     <Belt from={new THREE.Vector3(FORK.x, 0, 0.1)} to={END.defect.clone().add(dirOf('defect').multiplyScalar(0.35))} width={1.3} strip={mats.orange} speed={speed} trim={[{ side: -1, start: 2.1 }]} lift={0.004} />
-    <Gantry beam={mats.teal} cone={mats.cone} head={mats.head} scan={scan} reduced={reduced} />
+    <Gantry beam={mats.teal} cone={mats.cone} head={mats.head} scan={scan} reduced={reduced} fault={fun.emerg === 'camera'} />
     <Diverter paddleKey={paddleKey} mat={mats.paddle} />
     {KINDS.map((kind) => <StationCrate key={kind} kind={kind} rim={kind === 'good' ? mats.green : mats.orange} swap={swap[kind]} glow={1 + env.night * 1.5} onClick={onCrate} />)}
     {KINDS.map((kind) => swap[kind] && <Agv key={`agv-${kind}`} kind={kind} swap={swap[kind]!} rim={kind === 'good' ? mats.green : mats.orange} />)}
     <CrateLabel kind="good" count={bins.good} last={bins.lastGood} hit={bins.hitGood} fill={pile.good.length} swapping={!!swap.good} />
     <CrateLabel kind="defect" count={bins.defect} last={bins.lastDefect} hit={bins.hitDefect} fill={pile.defect.length} swapping={!!swap.defect} />
-    <Siren alert={alert} reduced={reduced} />
+    <Siren alert={alert ?? emDef?.level ?? null} reduced={reduced} />
     <ModelWave modelKey={modelKey} reduced={reduced} withLight={q.waveLight} />
     <HoloPanel stats={stats} reduced={reduced} />
 
@@ -1139,8 +1151,10 @@ const SHED_TRUSS: BoxItem[] = (() => {
 })();
 const SHED_LAMPS: BoxItem[] = [-10.5, -3.5, 3.5, 10.5].flatMap((x) => [-4.5, 1.5].map((z) => ({ p: [x, SHED.eave - 0.25 - 1.45, z] as [number, number, number], s: [1.0, 0.03, 0.3] as [number, number, number] })));
 
-function Warehouse() {
+function Warehouse({ lampsOn }: { lampsOn: boolean }) {
   const inside = useRef<THREE.Group>(null);
+  const lamp = mat('shed-lamp', () => new THREE.MeshBasicMaterial({ color: '#fff1cf', toneMapped: false }));
+  useEffect(() => { lamp.color.set(lampsOn ? '#fff1cf' : '#34332e'); }, [lamp, lampsOn]);
   const top = useMemo(() => new THREE.MeshStandardMaterial({ color: '#b8c4c6', transparent: true, opacity: 0.3, depthWrite: false, roughness: 0.6, metalness: 0.2 }), []);
   useEffect(() => () => top.dispose(), [top]);
   useFrame(({ camera }) => {
@@ -1180,7 +1194,7 @@ function Warehouse() {
     })}
     <group ref={inside}>
       <Boxes items={SHED_TRUSS} material={steel} />
-      <Boxes items={SHED_LAMPS} material={mat('shed-lamp', () => new THREE.MeshBasicMaterial({ color: '#fff1cf', toneMapped: false }))} />
+      <Boxes items={SHED_LAMPS} material={lamp} />
     </group>
     {/* "ส้มหยุด" sign over the open front, and one on the left gable wall facing the road */}
     <group position={[-0.6, 10.42, SHED.z1 + 0.1]}>
@@ -1520,10 +1534,10 @@ function FeedLine({ speed, reduced }: { speed: React.MutableRefObject<number>; r
   </group>;
 }
 
-// ---- Cat: salmon-orange tabby that wanders the site, sits, grooms and naps; click it for a "meow" -------
-const CAT_AREA = { x0: -19.5, x1: 19.5, z0: -8.6, z1: 15.5 };
-function catClear(x: number, z: number) {
-  if (x < CAT_AREA.x0 || x > CAT_AREA.x1 || z < CAT_AREA.z0 || z > CAT_AREA.z1) return false;
+// ---- Pets: salmon tabby cat + chihuahua; they wander around the colliders, sit, groom / sniff and nap ----------
+const PET_AREA = { x0: -19.5, x1: 19.5, z0: -8.6, z1: 15.5 };
+function petClear(x: number, z: number) {
+  if (x < PET_AREA.x0 || x > PET_AREA.x1 || z < PET_AREA.z0 || z > PET_AREA.z1) return false;
   for (const c of allColliders()) {
     const dx = c.bx - c.ax; const dz = c.bz - c.az; const len = dx * dx + dz * dz;
     const t = len ? clamp01(((x - c.ax) * dx + (z - c.az) * dz) / len) : 0;
@@ -1531,37 +1545,122 @@ function catClear(x: number, z: number) {
   }
   return true;
 }
-function catPath(ax: number, az: number, bx: number, bz: number) {
+function petPath(ax: number, az: number, bx: number, bz: number) {
   const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / 0.3));
-  for (let i = 1; i <= n; i++) if (!catClear(ax + ((bx - ax) * i) / n, az + ((bz - az) * i) / n)) return false;
+  for (let i = 1; i <= n; i++) if (!petClear(ax + ((bx - ax) * i) / n, az + ((bz - az) * i) / n)) return false;
   return true;
 }
+type PetMode = 'walk' | 'sit' | 'groom' | 'lie';
+type PetState = { x: number; z: number; yaw: number; mode: PetMode; until: number; tx: number; tz: number; ph: number; walkK: number; sitK: number; lieK: number; groomK: number; callAt: number };
+const newPet = (x: number, z: number, yaw: number): PetState => ({ x, z, yaw, mode: 'sit', until: 0, tx: 0, tz: 0, ph: 0, walkK: 0, sitK: 1, lieK: 0, groomK: 0, callAt: -10 });
+// Moves the pet (walk to a free spot, then rest a while); returns dt and now for the pose code.
+function stepPet(s: PetState, raw: number, reduced: boolean, speed: number, stride: number) {
+  const dt = Math.min(raw, 0.05); const now = performance.now() / 1000;
+  const rest = () => {
+    const r = Math.random();
+    s.mode = r < 0.4 ? 'sit' : r < 0.7 ? 'groom' : 'lie';
+    s.until = now + (s.mode === 'lie' ? 7 + Math.random() * 8 : 3 + Math.random() * 4);
+  };
+  if (!s.until) s.until = now + 2;
+  if (s.mode === 'walk') {
+    const dx = s.tx - s.x; const dz = s.tz - s.z; const d = Math.hypot(dx, dz);
+    let diff = Math.atan2(dx, dz) - s.yaw; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    s.yaw += THREE.MathUtils.clamp(diff, -2.5 * dt, 2.5 * dt);
+    const step = Math.min(d, (Math.abs(diff) < 0.6 ? speed : speed * 0.2) * dt);
+    const nx = s.x + Math.sin(s.yaw) * step; const nz = s.z + Math.cos(s.yaw) * step;
+    if (d < 0.08 || !petClear(nx, nz)) rest();
+    else { s.x = nx; s.z = nz; s.ph += step * stride; }
+  } else if (now > s.until) {
+    if (reduced) { s.mode = s.mode === 'lie' ? 'sit' : 'lie'; s.until = now + 10; }
+    else if (Math.random() < 0.65) {
+      let found = false;
+      for (let i = 0; i < 14 && !found; i++) {
+        const a = Math.random() * Math.PI * 2; const dist = 1.5 + Math.random() * 6;
+        const tx = s.x + Math.sin(a) * dist; const tz = s.z + Math.cos(a) * dist;
+        if (petClear(tx, tz) && petPath(s.x, s.z, tx, tz)) { s.tx = tx; s.tz = tz; s.mode = 'walk'; found = true; }
+      }
+      if (!found) { s.mode = 'sit'; s.until = now + 2; }
+    } else rest();
+  }
+  const k = 1 - Math.exp(-dt * 5);
+  s.walkK += ((s.mode === 'walk' ? 1 : 0) - s.walkK) * k;
+  s.lieK += ((s.mode === 'lie' ? 1 : 0) - s.lieK) * k;
+  s.groomK += ((s.mode === 'groom' ? 1 : 0) - s.groomK) * k;
+  return { dt, now, k };
+}
+// Click reaction: play the sound, sit down, show a speech bubble for 1.6 s.
+function usePetCall(key: number, s: React.MutableRefObject<PetState>, sound: () => void) {
+  const [bubble, setBubble] = useState(0);
+  useEffect(() => {
+    if (!key) return;
+    sound();
+    const now = performance.now() / 1000; const p = s.current;
+    p.callAt = now;
+    if (p.mode === 'walk' || p.mode === 'lie') { p.mode = 'sit'; p.until = now + 3; }
+    setBubble(key);
+    const id = window.setTimeout(() => setBubble(0), 1600);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return bubble;
+}
+
 let AUDIO: AudioContext | null = null;
-// Synthesised "meow": a sawtooth that rises and falls through a moving band-pass (no sound files).
+function audioCtx() {
+  const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctx) return null;
+  AUDIO ??= new Ctx();
+  void AUDIO.resume?.();
+  return AUDIO;
+}
+// "Mee-ow": the mouth (low-pass) opens for the "m", two vowel formants glide "ee" to "ow", then the mouth closes.
 function meow() {
   try {
-    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!Ctx) return;
-    AUDIO ??= new Ctx();
-    const ac = AUDIO; void ac.resume?.();
-    const t = ac.currentTime + 0.01; const k = 0.9 + Math.random() * 0.25;
+    const ac = audioCtx(); if (!ac) return;
+    const t = ac.currentTime + 0.01; const k = 0.92 + Math.random() * 0.16; const d = 0.6 + Math.random() * 0.12;
     const o = ac.createOscillator(); o.type = 'sawtooth';
-    o.frequency.setValueAtTime(430 * k, t);
-    o.frequency.linearRampToValueAtTime(760 * k, t + 0.14);
-    o.frequency.linearRampToValueAtTime(690 * k, t + 0.32);
-    o.frequency.exponentialRampToValueAtTime(360 * k, t + 0.62);
-    const vib = ac.createOscillator(); vib.frequency.value = 7;
-    const vg = ac.createGain(); vg.gain.value = 9; vib.connect(vg).connect(o.frequency);
-    const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 2.2;
-    f.frequency.setValueAtTime(800, t); f.frequency.linearRampToValueAtTime(1900, t + 0.16);
-    f.frequency.linearRampToValueAtTime(1300, t + 0.4); f.frequency.linearRampToValueAtTime(700, t + 0.62);
+    o.frequency.setValueAtTime(520 * k, t);
+    o.frequency.linearRampToValueAtTime(700 * k, t + d * 0.2);
+    o.frequency.linearRampToValueAtTime(780 * k, t + d * 0.38);
+    o.frequency.linearRampToValueAtTime(600 * k, t + d * 0.75);
+    o.frequency.linearRampToValueAtTime(470 * k, t + d);
+    const vib = ac.createOscillator(); vib.frequency.value = 5.5;
+    const vg = ac.createGain(); vg.gain.value = 6; vib.connect(vg).connect(o.frequency);
+    const mouth = ac.createBiquadFilter(); mouth.type = 'lowpass'; mouth.Q.value = 0.9;
+    mouth.frequency.setValueAtTime(350, t); mouth.frequency.linearRampToValueAtTime(3200, t + d * 0.2);
+    mouth.frequency.linearRampToValueAtTime(2600, t + d * 0.6); mouth.frequency.linearRampToValueAtTime(650, t + d);
+    const f1 = ac.createBiquadFilter(); f1.type = 'peaking'; f1.Q.value = 4; f1.gain.value = 10;
+    f1.frequency.setValueAtTime(1000, t); f1.frequency.linearRampToValueAtTime(1500, t + d * 0.33); f1.frequency.linearRampToValueAtTime(900, t + d * 0.9);
+    const f2 = ac.createBiquadFilter(); f2.type = 'peaking'; f2.Q.value = 5; f2.gain.value = 8;
+    f2.frequency.setValueAtTime(2700, t); f2.frequency.linearRampToValueAtTime(2200, t + d * 0.5); f2.frequency.linearRampToValueAtTime(1400, t + d * 0.9);
     const v = ac.createGain();
-    v.gain.setValueAtTime(0.0001, t); v.gain.exponentialRampToValueAtTime(0.32, t + 0.05);
-    v.gain.setValueAtTime(0.3, t + 0.38); v.gain.exponentialRampToValueAtTime(0.0001, t + 0.66);
-    o.connect(f).connect(v).connect(ac.destination);
-    o.start(t); vib.start(t); o.stop(t + 0.7); vib.stop(t + 0.7);
+    v.gain.setValueAtTime(0.0001, t); v.gain.linearRampToValueAtTime(0.2, t + 0.07);
+    v.gain.setValueAtTime(0.2, t + d * 0.65); v.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.02);
+    o.connect(mouth).connect(f1).connect(f2).connect(v).connect(ac.destination);
+    o.start(t); vib.start(t); o.stop(t + d + 0.05); vib.stop(t + d + 0.05);
   } catch { /* audio not available */ }
 }
+// Two short chihuahua yips: a falling squeak through a band-pass plus a puff of noise.
+function bark() {
+  try {
+    const ac = audioCtx(); if (!ac) return;
+    const noise = ac.createBuffer(1, Math.floor(ac.sampleRate * 0.12), ac.sampleRate);
+    const data = noise.getChannelData(0); for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    [0, 0.2].forEach((off, n) => {
+      const t = ac.currentTime + 0.01 + off; const k = 1 + n * 0.08 + Math.random() * 0.06;
+      const o = ac.createOscillator(); o.type = 'square';
+      o.frequency.setValueAtTime(950 * k, t); o.frequency.linearRampToValueAtTime(1250 * k, t + 0.025); o.frequency.exponentialRampToValueAtTime(620 * k, t + 0.11);
+      const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1700; f.Q.value = 1.4;
+      const g = ac.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.16, t + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
+      o.connect(f).connect(g).connect(ac.destination); o.start(t); o.stop(t + 0.15);
+      const src = ac.createBufferSource(); src.buffer = noise;
+      const nf = ac.createBiquadFilter(); nf.type = 'bandpass'; nf.frequency.value = 2500; nf.Q.value = 0.8;
+      const ng = ac.createGain(); ng.gain.value = 0.06;
+      src.connect(nf).connect(ng).connect(ac.destination); src.start(t);
+    });
+  } catch { /* audio not available */ }
+}
+
 const catFur = () => mat('cat-fur', () => new THREE.MeshStandardMaterial({
   roughness: 0.95,
   map: canvasTex('cat-stripes', 64, 128, (g, w, h) => {
@@ -1576,69 +1675,34 @@ const catFur = () => mat('cat-fur', () => new THREE.MeshStandardMaterial({
     }
   }),
 }));
-type CatMode = 'walk' | 'sit' | 'groom' | 'lie';
-function Cat({ meowKey, onCat, reduced, marker }: { meowKey: number; onCat: () => void; reduced: boolean; marker: React.MutableRefObject<SVGCircleElement | null> }) {
+type PetProps = { callKey: number; onCall: () => void; reduced: boolean; marker: React.MutableRefObject<SVGCircleElement | null> };
+function petHit(kind: 'cat' | 'dog', onCall: () => void, gl: THREE.WebGLRenderer, y: number, s: number) {
+  return <mesh geometry={geo().hit} position={[0, y, 0.08]} scale={s} material={hitMat()} userData={{ pet: kind }}
+    onClick={(e) => { e.stopPropagation(); onCall(); }}
+    onPointerOver={(e) => { e.stopPropagation(); gl.domElement.style.cursor = 'pointer'; }} onPointerOut={() => { gl.domElement.style.cursor = ''; }} />;
+}
+function Cat({ callKey, onCall, reduced, marker }: PetProps) {
   const root = useRef<THREE.Group>(null); const hip = useRef<THREE.Group>(null); const upper = useRef<THREE.Group>(null);
   const head = useRef<THREE.Group>(null); const tail = useRef<THREE.Group>(null); const tail2 = useRef<THREE.Group>(null);
   const legs = useRef<(THREE.Group | null)[]>([]); // front left, front right, back left, back right
   const gl = useThree((st) => st.gl);
-  const st = useRef({ x: 3, z: 6.4, yaw: -2.4, mode: 'sit' as CatMode, until: 0, tx: 0, tz: 0, ph: 0, walkK: 0, sitK: 1, lieK: 0, groomK: 0, meowAt: -10 });
-  const [bubble, setBubble] = useState(0);
-  useEffect(() => {
-    if (!meowKey) return;
-    meow();
-    const s = st.current; const now = performance.now() / 1000;
-    s.meowAt = now;
-    if (s.mode !== 'sit') { s.mode = 'sit'; s.until = now + 3; }
-    setBubble(meowKey);
-    const id = window.setTimeout(() => setBubble(0), 1600);
-    return () => window.clearTimeout(id);
-  }, [meowKey]);
+  const st = useRef(newPet(3, 6.4, -2.4));
+  const bubble = usePetCall(callKey, st, meow);
   useFrame((_, raw) => {
-    const dt = Math.min(raw, 0.05); const now = performance.now() / 1000; const s = st.current;
-    const rest = () => {
-      const r = Math.random();
-      s.mode = r < 0.4 ? 'sit' : r < 0.7 ? 'groom' : 'lie';
-      s.until = now + (s.mode === 'lie' ? 7 + Math.random() * 8 : 3 + Math.random() * 4);
-    };
-    if (!s.until) s.until = now + 2;
-    if (s.mode === 'walk') {
-      const dx = s.tx - s.x; const dz = s.tz - s.z; const d = Math.hypot(dx, dz);
-      let diff = Math.atan2(dx, dz) - s.yaw; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      s.yaw += THREE.MathUtils.clamp(diff, -2.5 * dt, 2.5 * dt);
-      const step = Math.min(d, (Math.abs(diff) < 0.6 ? 0.45 : 0.08) * dt);
-      const nx = s.x + Math.sin(s.yaw) * step; const nz = s.z + Math.cos(s.yaw) * step;
-      if (d < 0.08 || !catClear(nx, nz)) rest();
-      else { s.x = nx; s.z = nz; s.ph += step * 13; }
-    } else if (now > s.until) {
-      if (reduced) { s.mode = s.mode === 'lie' ? 'sit' : 'lie'; s.until = now + 10; }
-      else if (Math.random() < 0.65) {
-        let found = false;
-        for (let i = 0; i < 14 && !found; i++) {
-          const a = Math.random() * Math.PI * 2; const dist = 1.5 + Math.random() * 6;
-          const tx = s.x + Math.sin(a) * dist; const tz = s.z + Math.cos(a) * dist;
-          if (catClear(tx, tz) && catPath(s.x, s.z, tx, tz)) { s.tx = tx; s.tz = tz; s.mode = 'walk'; found = true; }
-        }
-        if (!found) { s.mode = 'sit'; s.until = now + 2; }
-      } else rest();
-    }
-    const k = 1 - Math.exp(-dt * 5);
-    s.walkK += ((s.mode === 'walk' ? 1 : 0) - s.walkK) * k;
+    const s = st.current;
+    const { now, k } = stepPet(s, raw, reduced, 0.45, 13);
     s.sitK += ((s.mode === 'sit' || s.mode === 'groom' ? 1 : 0) - s.sitK) * k;
-    s.lieK += ((s.mode === 'lie' ? 1 : 0) - s.lieK) * k;
-    s.groomK += ((s.mode === 'groom' ? 1 : 0) - s.groomK) * k;
     if (root.current) { root.current.position.set(s.x, 0, s.z); root.current.rotation.y = s.yaw; }
     if (marker.current) { marker.current.setAttribute('cx', s.x.toFixed(2)); marker.current.setAttribute('cy', s.z.toFixed(2)); }
     if (hip.current) hip.current.position.y = 0.22 - 0.06 * s.sitK - 0.12 * s.lieK;
     if (upper.current) upper.current.rotation.x = -0.55 * s.sitK;
     const swing = Math.sin(s.ph) * 0.55 * s.walkK;
-    const L = legs.current;
-    const tuck = 1 - 0.68 * s.lieK;
+    const L = legs.current; const tuck = 1 - 0.68 * s.lieK;
     if (L[0]) { L[0].rotation.x = swing + 0.55 * s.sitK; L[0].scale.y = (1 + 0.6 * s.sitK) * tuck; }
     if (L[1]) { L[1].rotation.x = -swing + 0.55 * s.sitK - s.groomK * (1.3 + 0.25 * Math.sin(now * 7)); L[1].scale.y = (1 + 0.6 * s.sitK) * tuck; }
     if (L[2]) { L[2].rotation.x = -swing - 1.1 * s.sitK - 1.2 * s.lieK; L[2].scale.y = (1 - 0.4 * s.sitK) * tuck; }
     if (L[3]) { L[3].rotation.x = swing - 1.1 * s.sitK - 1.2 * s.lieK; L[3].scale.y = (1 - 0.4 * s.sitK) * tuck; }
-    const since = now - s.meowAt;
+    const since = now - s.callAt;
     if (head.current) {
       head.current.rotation.x = 0.45 * s.sitK + s.groomK * (0.55 + 0.2 * Math.sin(now * 7)) + 0.15 * s.lieK - (since < 0.9 ? 0.3 : 0);
       head.current.rotation.y = s.groomK * 0.5 + (reduced ? 0 : Math.sin(now * 0.4) * 0.25 * (1 - s.walkK) * (1 - s.groomK));
@@ -1657,7 +1721,7 @@ function Cat({ meowKey, onCat, reduced, marker }: { meowKey: number; onCat: () =
     <mesh geometry={g.box} position={[0, -0.1, 0]} scale={[0.05, 0.2, 0.055]} material={plain} />
     <mesh geometry={g.blob} position={[0, -0.2, 0.012]} scale={[0.03, 0.018, 0.04]} material={cream} />
   </group>;
-  return <group ref={root} userData={{ cat: true }}>
+  return <group ref={root}>
     <group ref={hip} position={[0, 0.22, -0.14]}>
       {leg(2, -0.065, 0, 0)}
       {leg(3, 0.065, 0, 0)}
@@ -1685,13 +1749,276 @@ function Cat({ meowKey, onCat, reduced, marker }: { meowKey: number; onCat: () =
         </group>
       </group>
     </group>
-    <mesh geometry={g.hit} position={[0, 0.28, 0.1]} scale={0.75} material={hitMat()}
-      onClick={(e) => { e.stopPropagation(); onCat(); }}
-      onPointerOver={(e) => { e.stopPropagation(); gl.domElement.style.cursor = 'pointer'; }} onPointerOut={() => { gl.domElement.style.cursor = ''; }} />
+    {petHit('cat', onCall, gl, 0.28, 0.75)}
     {bubble > 0 && <Html position={[0, 0.82, 0.1]} center zIndexRange={[7, 0]} style={{ pointerEvents: 'none' }}>
       <div key={bubble} className="lv3d-meow">เมี้ยว</div>
     </Html>}
   </group>;
+}
+
+// Chihuahua: small tan dog with big ears; trots faster than the cat and sniffs the floor instead of grooming.
+function Dog({ callKey, onCall, reduced, marker }: PetProps) {
+  const root = useRef<THREE.Group>(null); const hip = useRef<THREE.Group>(null); const upper = useRef<THREE.Group>(null);
+  const head = useRef<THREE.Group>(null); const tail = useRef<THREE.Group>(null);
+  const legs = useRef<(THREE.Group | null)[]>([]);
+  const gl = useThree((st) => st.gl);
+  const st = useRef(newPet(-1.2, 9.6, 2.6));
+  const bubble = usePetCall(callKey, st, bark);
+  useFrame((_, raw) => {
+    const s = st.current;
+    const { now, k } = stepPet(s, raw, reduced, 0.75, 24);
+    s.sitK += ((s.mode === 'sit' ? 1 : 0) - s.sitK) * k;
+    if (root.current) { root.current.position.set(s.x, 0, s.z); root.current.rotation.y = s.yaw; }
+    if (marker.current) { marker.current.setAttribute('cx', s.x.toFixed(2)); marker.current.setAttribute('cy', s.z.toFixed(2)); }
+    const trot = s.walkK * Math.abs(Math.sin(s.ph)) * 0.015;
+    if (hip.current) hip.current.position.y = 0.17 - 0.05 * s.sitK - 0.1 * s.lieK + trot;
+    if (upper.current) upper.current.rotation.x = -0.5 * s.sitK;
+    const swing = Math.sin(s.ph) * 0.6 * s.walkK;
+    const L = legs.current; const tuck = 1 - 0.7 * s.lieK;
+    if (L[0]) { L[0].rotation.x = swing + 0.5 * s.sitK; L[0].scale.y = (1 + 0.55 * s.sitK) * tuck; }
+    if (L[1]) { L[1].rotation.x = -swing + 0.5 * s.sitK; L[1].scale.y = (1 + 0.55 * s.sitK) * tuck; }
+    if (L[2]) { L[2].rotation.x = -swing - 1.1 * s.sitK - 1.2 * s.lieK; L[2].scale.y = (1 - 0.4 * s.sitK) * tuck; }
+    if (L[3]) { L[3].rotation.x = swing - 1.1 * s.sitK - 1.2 * s.lieK; L[3].scale.y = (1 - 0.4 * s.sitK) * tuck; }
+    const since = now - s.callAt;
+    if (head.current) {
+      // sniffing the floor (the "groom" mode), looking around, a little hop of the head when it barks
+      head.current.rotation.x = 0.4 * s.sitK + s.groomK * (0.75 + 0.15 * Math.sin(now * 9)) + 0.2 * s.lieK - (since < 0.5 ? 0.35 * Math.sin(since * 12) : 0);
+      head.current.rotation.y = reduced ? 0 : Math.sin(now * 0.7) * 0.35 * (1 - s.walkK);
+      head.current.rotation.z = (1 - s.walkK) * 0.15 * Math.sin(now * 0.5);
+    }
+    if (tail.current) tail.current.rotation.z = reduced ? 0 : Math.sin(now * (s.walkK > 0.5 || since < 3 ? 16 : 5)) * 0.5 * (1 - s.lieK);
+  });
+  const g = geo();
+  const tan = std('#d8a465', { roughness: 0.9 }); const cream = std('#f3dcb8', { roughness: 0.9 });
+  const dark = std('#1d1a18', { roughness: 0.25 }); const pink = std('#ef9aa8'); const collar = std('#d6332b', { roughness: 0.5 });
+  const ear = useMemo(() => new THREE.ConeGeometry(0.042, 0.11, 4), []);
+  const seg = useMemo(() => new THREE.CylinderGeometry(0.012, 0.018, 1, 6), []);
+  const ring = useMemo(() => new THREE.TorusGeometry(0.05, 0.011, 6, 14), []);
+  useEffect(() => () => { ear.dispose(); seg.dispose(); ring.dispose(); }, [ear, seg, ring]);
+  const leg = (i: number, x: number, z: number, parentY: number) => <group key={i} ref={(el) => { legs.current[i] = el; }} position={[x, parentY, z]}>
+    <mesh geometry={g.box} position={[0, -0.08, 0]} scale={[0.026, 0.16, 0.03]} material={tan} />
+    <mesh geometry={g.blob} position={[0, -0.16, 0.008]} scale={[0.018, 0.012, 0.024]} material={cream} />
+  </group>;
+  return <group ref={root}>
+    <group ref={hip} position={[0, 0.17, -0.1]}>
+      {leg(2, -0.045, 0, 0)}
+      {leg(3, 0.045, 0, 0)}
+      <group ref={upper}>
+        <mesh geometry={g.blob} position={[0, 0.02, 0.1]} scale={[0.085, 0.075, 0.15]} material={tan} castShadow />
+        <mesh geometry={g.blob} position={[0, -0.005, 0.19]} scale={[0.062, 0.062, 0.06]} material={cream} />
+        <mesh geometry={ring} position={[0, 0.065, 0.225]} rotation={[Math.PI / 2 - 0.4, 0, 0]} material={collar} />
+        <mesh geometry={g.blob} position={[0, 0.02, 0.272]} scale={0.012} material={std('#f2c230', { metalness: 0.6, roughness: 0.3 })} />
+        {leg(0, -0.04, 0.19, -0.02)}
+        {leg(1, 0.04, 0.19, -0.02)}
+        <group ref={head} position={[0, 0.13, 0.26]}>
+          <mesh geometry={g.blob} scale={[0.075, 0.07, 0.07]} material={tan} castShadow />
+          <mesh geometry={g.blob} position={[0, -0.025, 0.062]} scale={[0.032, 0.026, 0.035]} material={cream} />
+          <mesh geometry={g.blob} position={[0, -0.016, 0.096]} scale={0.011} material={dark} />
+          {[-1, 1].map((s) => <mesh key={`e${s}`} geometry={g.blob} position={[s * 0.034, 0.012, 0.056]} scale={[0.016, 0.018, 0.012]} material={dark} />)}
+          {[-1, 1].map((s) => <group key={`r${s}`} position={[s * 0.05, 0.075, -0.005]} rotation={[0, 0, -s * 0.5]}>
+            <mesh geometry={ear} material={tan} />
+            <mesh geometry={ear} position={[0, -0.005, 0.012]} scale={[0.6, 0.75, 0.4]} material={pink} />
+          </group>)}
+        </group>
+        <group ref={tail} position={[0, 0.05, -0.04]} rotation={[-1.0, 0, 0]}>
+          <mesh geometry={seg} position={[0, 0.05, 0]} scale={[1, 0.1, 1]} material={tan} />
+          <mesh geometry={seg} position={[0, 0.11, 0.025]} rotation={[0.7, 0, 0]} scale={[0.85, 0.07, 0.85]} material={tan} />
+        </group>
+      </group>
+    </group>
+    {petHit('dog', onCall, gl, 0.2, 0.55)}
+    {bubble > 0 && <Html position={[0, 0.62, 0.1]} center zIndexRange={[7, 0]} style={{ pointerEvents: 'none' }}>
+      <div key={bubble} className="lv3d-meow">โฮ่ง!</div>
+    </Html>}
+  </group>;
+}
+
+// ---- Team figures: the four members stand at their part of the line; walk up and press E to see who they are --------
+const TEAM = [
+  { letter: 'A', no: '01', name: 'วุฒิไกร แย้มพุ่ม', nick: 'วุฒิไกร', role: 'Dataset / Labeling', desc: 'จัดเตรียมชุดข้อมูลและทำ Labeling ให้พร้อมสำหรับการเทรน', color: '#f5a623', hair: 'short', x: -12.2, z: 3.4, rot: 0.3 },
+  { letter: 'B', no: '02', name: 'ธาริณี สนิทสตรี', nick: 'ธาริณี', role: 'Training (CIRA CORE)', desc: 'ฝึกและพัฒนาโมเดลสำหรับการตรวจจับผลไม้และตำหนิ', color: '#22b8a0', hair: 'long', x: -7.9, z: 2.4, rot: 0.4 },
+  { letter: 'C', no: '03', name: 'ณัฐกฤษณ์ เบ้าสาลี', nick: 'ณัฐกฤษณ์', role: 'Coding & Functions', desc: 'พัฒนาฟังก์ชันและโค้ดที่เชื่อมการทำงานของระบบ', color: '#8a63d2', hair: 'short', x: -2.6, z: 6.6, rot: -0.3 },
+  { letter: 'D', no: '04', name: 'ศรัณย์ภัทร ตรีเพียร', nick: 'ศรัณย์ภัทร', role: 'Platform & Dashboard', desc: 'ออกแบบแพลตฟอร์มและ Dashboard สำหรับติดตามระบบ', color: '#3a9be0', hair: 'short', x: 0.4, z: -7.3, rot: 0 },
+] as const;
+type Member = (typeof TEAM)[number];
+const letterTex = (m: Member) => canvasTex(`team-${m.letter}`, 128, 128, (g, w, h, font) => {
+  g.fillStyle = '#ffffff'; g.beginPath(); g.arc(64, 64, 62, 0, Math.PI * 2); g.fill();
+  g.fillStyle = m.color; g.beginPath(); g.arc(64, 64, 54, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#ffffff'; g.font = `900 72px ${font}`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(m.letter, 64, 68);
+});
+function TeamMember({ m, i, talking, onTeam }: { m: Member; i: number; talking: boolean; onTeam: (i: number) => void }) {
+  const head = useRef<THREE.Group>(null); const arm = useRef<THREE.Group>(null); const body = useRef<THREE.Group>(null);
+  const gl = useThree((st) => st.gl);
+  useFrame(({ clock }) => {
+    const t = clock.elapsedTime + i * 1.7;
+    if (body.current) body.current.scale.y = 1 + Math.sin(t * 1.6) * 0.008;
+    if (head.current) head.current.rotation.y = talking ? 0 : Math.sin(t * 0.45) * 0.35;
+    if (arm.current) arm.current.rotation.z = talking ? 2.6 + Math.sin(t * 8) * 0.3 : 0.06;
+  });
+  const g = geo();
+  const shirt = std(m.color, { flatShading: true, roughness: 0.7 }); const pants = std('#34404a', { flatShading: true });
+  const skin = std('#e7b48a', { flatShading: true }); const hair = std('#2b2118', { flatShading: true, roughness: 0.6 });
+  return <group position={[m.x, 0, m.z]} rotation={[0, m.rot, 0]}>
+    <group ref={body}>
+      {[-0.12, 0.12].map((x) => <group key={x} position={[x, 0, 0]}>
+        <mesh geometry={g.box} position={[0, 0.41, 0]} scale={[0.17, 0.8, 0.19]} material={pants} castShadow />
+        <mesh geometry={g.box} position={[0, 0.03, 0.05]} scale={[0.19, 0.08, 0.3]} material={std('#f4f4f4')} />
+      </group>)}
+      <mesh geometry={g.box} position={[0, 1.13, 0]} scale={[0.5, 0.64, 0.28]} material={shirt} castShadow />
+      <mesh position={[0.12, 1.28, 0.142]} material={mat(`team-badge-${m.letter}`, () => new THREE.MeshBasicMaterial({ map: letterTex(m), transparent: true, alphaTest: 0.5 }))}><planeGeometry args={[0.15, 0.15]} /></mesh>
+      <group position={[-0.33, 1.4, 0]}>
+        <mesh geometry={g.box} position={[0, -0.28, 0]} scale={[0.13, 0.58, 0.15]} material={shirt} castShadow />
+        <mesh geometry={g.box} position={[0, -0.6, 0]} scale={[0.11, 0.1, 0.12]} material={skin} />
+      </group>
+      <group ref={arm} position={[0.33, 1.4, 0]}>
+        <mesh geometry={g.box} position={[0, -0.28, 0]} scale={[0.13, 0.58, 0.15]} material={shirt} castShadow />
+        <mesh geometry={g.box} position={[0, -0.6, 0]} scale={[0.11, 0.1, 0.12]} material={skin} />
+      </group>
+      <group ref={head} position={[0, 1.62, 0]}>
+        <mesh geometry={g.blob} scale={0.17} material={skin} castShadow />
+        <mesh geometry={g.blob} position={[0, 0.06, -0.02]} scale={[0.182, 0.13, 0.18]} material={hair} />
+        {m.hair === 'long' && <mesh geometry={g.box} position={[0, -0.1, -0.1]} scale={[0.32, 0.38, 0.1]} material={hair} />}
+        {[-1, 1].map((s) => <mesh key={s} geometry={g.blob} position={[s * 0.06, 0.01, 0.155]} scale={[0.02, 0.026, 0.01]} material={std('#1d1a18')} />)}
+      </group>
+    </group>
+    <mesh geometry={g.box} position={[0, 0.95, 0]} scale={[0.75, 1.95, 0.6]} material={hitMat()} userData={{ team: i }}
+      onClick={(e) => { e.stopPropagation(); onTeam(i); }}
+      onPointerOver={(e) => { e.stopPropagation(); gl.domElement.style.cursor = 'pointer'; }} onPointerOut={() => { gl.domElement.style.cursor = ''; }} />
+    <Html position={[0, 2.08, 0]} center zIndexRange={[6, 0]} style={{ pointerEvents: 'none' }}>
+      <div className="lv3d-member" style={{ ['--c' as string]: m.color }}><b>{m.letter}</b>{m.nick}</div>
+    </Html>
+  </group>;
+}
+function TeamCard({ i, onClose }: { i: number; onClose: () => void }) {
+  const m = TEAM[i];
+  return <div className="lv3d-team" style={{ ['--c' as string]: m.color }} role="dialog" aria-label={`สมาชิก ${m.name}`}>
+    <div className="lv3d-team-head">
+      <i>{m.letter}</i><span>สมาชิกทีม · {m.no}</span>
+      <button type="button" title="ปิด (Esc)" onClick={onClose}><X size={13} /></button>
+    </div>
+    <small>ชื่อ-นามสกุล</small>
+    <strong>{m.name}</strong>
+    <small>หน้าที่ในทีม</small>
+    <b>{m.role}</b>
+    <p>{m.desc}</p>
+    <em>ทีมส้มหยุด · ระบบคัดแยกผลไม้ CIRA CORE</em>
+  </div>;
+}
+
+// ---- Emergency drills: visual-only test cases started from the panel next to the control console.
+// Nothing here sends a command or writes data; counts and the replay keep running as usual.
+type Emerg = 'fire' | 'power' | 'jam' | 'camera' | 'estop';
+const EMERG: Record<Emerg, { label: string; color: string; level: 'warning' | 'critical'; desc: string }> = {
+  fire: { label: 'ไฟไหม้', color: '#ff3b2f', level: 'critical', desc: 'เปลวไฟและควันที่มุมโกดัง ไฟแดงหมุนรอบโกดัง' },
+  power: { label: 'ไฟดับ', color: '#ffd21f', level: 'warning', desc: 'ไฟในโกดังดับ เหลือไฟฉุกเฉินสีเหลือง' },
+  jam: { label: 'สายพานติด', color: '#ff9b2f', level: 'warning', desc: 'ไฟเตือนกะพริบตลอดสายพานหลัก' },
+  camera: { label: 'กล้องขัดข้อง', color: '#4f8dff', level: 'warning', desc: 'ไฟสถานะกล้องเป็นสีแดงกะพริบ' },
+  estop: { label: 'หยุดฉุกเฉิน', color: '#ff3b2f', level: 'critical', desc: 'ไฟแดงรอบโกดังและไซเรน' },
+};
+const EMERG_KEYS = Object.keys(EMERG) as Emerg[];
+const EMERG_SEC = 30;
+const TEST_PANEL = { x: -8.3, z: 5.8 }; // left of the control console (CONSOLE)
+const FIRE_AT = { x: -18.2, z: -7.4 };
+const BEACONS: [number, number][] = [[SHED.x0 + 0.3, SHED.z1], [SHED.x1 - 0.3, SHED.z1], [SHED.x0 + 0.3, 2.5], [SHED.x1 - 0.3, 2.5], [SHED.x0 + 0.3, SHED.sideZ], [SHED.x1 - 0.3, SHED.sideZ], [-14, SHED.z0 + 0.5], [0, SHED.z0 + 0.5], [14, SHED.z0 + 0.5]];
+
+function EmergencyPanel({ active, onPress }: { active: Emerg | null; onPress: (e: Emerg) => void }) {
+  const g = geo();
+  const gl = useThree((st) => st.gl);
+  const caps = useMemo(() => EMERG_KEYS.map((k) => new THREE.MeshStandardMaterial({ color: EMERG[k].color, emissive: new THREE.Color(EMERG[k].color), emissiveIntensity: 0.2, roughness: 0.35 })), []);
+  useEffect(() => () => caps.forEach((m) => m.dispose()), [caps]);
+  useFrame(({ clock }) => {
+    caps.forEach((m, i) => { m.emissiveIntensity = EMERG_KEYS[i] === active ? 0.9 + 0.6 * Math.sin(clock.elapsedTime * 9) : 0.25; });
+  });
+  const tex = canvasTex('emerg-panel', 1024, 440, (c, w, h, font) => {
+    c.fillStyle = '#1a1206'; c.fillRect(0, 0, w, h);
+    for (let x = -h; x < w; x += 60) { c.fillStyle = '#f2c230'; c.beginPath(); c.moveTo(x, 0); c.lineTo(x + 30, 0); c.lineTo(x + 30 + 26, 26); c.lineTo(x + 26, 26); c.fill(); }
+    c.fillStyle = '#ffd27a'; c.font = `900 50px ${font}`; c.textAlign = 'center'; c.fillText('จำลองเหตุฉุกเฉิน', w / 2, 92);
+    c.fillStyle = '#cfd8d3'; c.font = `600 26px ${font}`; c.fillText('โหมดทดสอบ · แค่ภาพในฉาก ไม่ส่งคำสั่ง ไม่กระทบระบบ', w / 2, 136);
+    EMERG_KEYS.forEach((k, i) => { c.fillStyle = '#ffffff'; c.font = `800 28px ${font}`; c.fillText(EMERG[k].label, 112 + i * 200, 392); });
+  });
+  return <group position={[TEST_PANEL.x, 0, TEST_PANEL.z]}>
+    <mesh geometry={g.box} position={[0, 0.5, 0]} scale={[2.2, 1.0, 0.9]} material={std('#2b3236', { roughness: 0.5 })} castShadow receiveShadow />
+    <mesh geometry={g.box} position={[0, 0.25, 0.452]} scale={[2.2, 0.12, 0.01]} material={std('#f2c230', { roughness: 0.6 })} />
+    <group position={[0, 1.08, 0.05]} rotation={[0.55, 0, 0]}>
+      <mesh geometry={g.box} scale={[2.2, 0.06, 1.0]} material={std('#1d2427', { roughness: 0.4 })} castShadow />
+      <mesh position={[0, 0.035, 0]} rotation={[-Math.PI / 2, 0, 0]}><planeGeometry args={[2.1, 0.9]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
+      {EMERG_KEYS.map((k, i) => {
+        // canvas x 112 + i*200 of 1024 across 2.1 units; buttons sit just above their labels
+        const x = -1.05 + ((112 + i * 200) / 1024) * 2.1;
+        return <group key={k} position={[x, 0.06, 0.12]} userData={{ emerg: k }}
+          onClick={(e) => { e.stopPropagation(); onPress(k); }}
+          onPointerOver={(e) => { e.stopPropagation(); gl.domElement.style.cursor = 'pointer'; }} onPointerOut={() => { gl.domElement.style.cursor = ''; }}>
+          <mesh position={[0, 0, 0]}><cylinderGeometry args={[0.15, 0.17, 0.04, 20]} /><meshStandardMaterial color="#3b4246" /></mesh>
+          <mesh position={[0, 0.05, 0]} material={caps[i]}><cylinderGeometry args={[0.11, 0.12, 0.07, 20]} /></mesh>
+        </group>;
+      })}
+    </group>
+  </group>;
+}
+
+function EmergencyBeacons({ color, reduced, withLight }: { color: string; reduced: boolean; withLight: boolean }) {
+  const spins = useRef<(THREE.Group | null)[]>([]);
+  const light = useRef<THREE.PointLight>(null);
+  const dome = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false }), [color]);
+  const beam = useMemo(() => new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.2, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, toneMapped: false }), [color]);
+  useEffect(() => () => { dome.dispose(); beam.dispose(); }, [dome, beam]);
+  const cone = useMemo(() => new THREE.ConeGeometry(0.35, 2.4, 12, 1, true), []);
+  useEffect(() => () => cone.dispose(), [cone]);
+  useFrame(({ clock }, dt) => {
+    spins.current.forEach((g) => { if (g && !reduced) g.rotation.y += dt * 5; });
+    const pulse = reduced ? 0.7 : 0.5 + 0.5 * Math.sin(clock.elapsedTime * 6);
+    if (light.current) light.current.intensity = withLight ? 30 * pulse : 0;
+  });
+  return <>
+    {BEACONS.map(([x, z], i) => <group key={i} position={[x, 4.6, z]}>
+      <mesh geometry={geo().box} position={[0, -0.08, 0]} scale={[0.3, 0.08, 0.3]} material={std('#2b3033')} />
+      <mesh material={dome}><sphereGeometry args={[0.15, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2]} /></mesh>
+      <group ref={(el) => { spins.current[i] = el; }} position={[0, 0.08, 0]}>
+        {[0, Math.PI].map((a) => <mesh key={a} geometry={cone} rotation={[0, a, Math.PI / 2]} position={[Math.cos(a) * 1.2, 0, -Math.sin(a) * 1.2]} material={beam} />)}
+      </group>
+    </group>)}
+    <pointLight ref={light} position={[0, 7, -1]} distance={48} color={color} intensity={0} />
+  </>;
+}
+
+function Fire({ reduced }: { reduced: boolean }) {
+  const flames = useRef<(THREE.Mesh | null)[]>([]); const smoke = useRef<(THREE.Mesh | null)[]>([]);
+  const light = useRef<THREE.PointLight>(null);
+  const cone = useMemo(() => new THREE.ConeGeometry(0.3, 1, 8, 1, true).translate(0, 0.5, 0), []);
+  const hot = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ff7a1a', transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, side: THREE.DoubleSide }), []);
+  const core = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ffd84a', transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, side: THREE.DoubleSide }), []);
+  const puffs = useMemo(() => Array.from({ length: 7 }, () => new THREE.MeshBasicMaterial({ color: '#3d3a36', transparent: true, opacity: 0, depthWrite: false })), []);
+  useEffect(() => () => { cone.dispose(); hot.dispose(); core.dispose(); puffs.forEach((m) => m.dispose()); }, [cone, hot, core, puffs]);
+  useFrame(({ clock }) => {
+    const t = clock.elapsedTime;
+    flames.current.forEach((f, i) => { if (f) f.scale.set(1, (i < 3 ? 1.3 : 0.8) * (reduced ? 1 : 0.8 + 0.35 * Math.abs(Math.sin(t * (9 + i * 2.3) + i))), 1); });
+    smoke.current.forEach((p, i) => {
+      if (!p) return;
+      const k = (t * 0.25 + i / puffs.length) % 1;
+      p.position.set(Math.sin(i * 2 + t * 0.6) * 0.4 * k, 1.2 + k * 5, Math.cos(i * 1.3) * 0.3 * k);
+      p.scale.setScalar(0.4 + k * 1.6);
+      puffs[i].opacity = Math.sin(k * Math.PI) * 0.55;
+    });
+    if (light.current) light.current.intensity = 14 + (reduced ? 0 : 6 * Math.sin(t * 17) * Math.sin(t * 7.3));
+  });
+  const g = geo();
+  return <group position={[FIRE_AT.x, 0, FIRE_AT.z]}>
+    <mesh geometry={g.box} position={[0, 0.15, 0]} scale={[1.2, 0.3, 1.0]} material={std('#2a1d14', { roughness: 1 })} />
+    {[[0, 0, 1], [0.3, 0.15, 0.8], [-0.3, -0.1, 0.85], [0.15, -0.3, 0.6], [-0.2, 0.3, 0.6]].map(([x, z, s], i) => <mesh key={i} ref={(el) => { flames.current[i] = el; }}
+      geometry={cone} position={[x, 0.3, z]} scale={[s, 1, s]} material={i < 3 ? hot : core} />)}
+    {puffs.map((m, i) => <mesh key={`s${i}`} ref={(el) => { smoke.current[i] = el; }} geometry={g.blob} material={m} />)}
+    <pointLight ref={light} position={[0, 1.4, 0]} distance={10} color="#ff7a2a" intensity={14} />
+  </group>;
+}
+
+function JamWarning({ reduced }: { reduced: boolean }) {
+  const m = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ff9b2f', transparent: true, opacity: 0.8, toneMapped: false }), []);
+  useEffect(() => () => m.dispose(), [m]);
+  useFrame(({ clock }) => { m.opacity = reduced ? 0.7 : Math.sin(clock.elapsedTime * 8) > 0 ? 0.95 : 0.15; });
+  const len = FORK.x - START.x; const cx = (FORK.x + START.x) / 2;
+  return <>
+    {[-1, 1].map((s) => <mesh key={s} geometry={geo().box} position={[cx, BELT_Y + 0.18, s * 0.8]} scale={[len, 0.05, 0.14]} material={m} />)}
+  </>;
 }
 
 // ---- Walk mode (first / third person) ------------------------------------------------------------
@@ -1747,6 +2074,8 @@ function buildColliders(): Capsule[] {
   cap(VIEW.x - 3.4, VIEW.z - 2.1, VIEW.x - 0.8, VIEW.z - 2.1, 0.12, 0.95);
   cap(VIEW.x + 0.8, VIEW.z - 2.1, VIEW.x + 3.4, VIEW.z - 2.1, 0.12, 0.95);
   cap(VIEW_SIGN.x, VIEW_SIGN.z, VIEW_SIGN.x, VIEW_SIGN.z, 0.15);
+  for (const m of TEAM) cap(m.x, m.z, m.x, m.z, 0.35);
+  cap(TEST_PANEL.x - 1.1, TEST_PANEL.z, TEST_PANEL.x + 1.1, TEST_PANEL.z, 0.5);
   return out;
 }
 let COLLIDERS: Capsule[] | null = null;
@@ -1765,7 +2094,12 @@ const WARPS: { key: string; label: string; x: number; z: number; yaw: number; pi
   { key: 'view', label: 'จุดชมวิว', x: VIEW.x, z: VIEW.z - 0.9, yaw: 0.05, pitch: 0.02 },
   ...WALL_KEYS.map((key) => { const b = BOARDS[key]; return { key, label: b.label, x: b.x + Math.sin(b.rot) * 4.5, z: b.z + Math.cos(b.rot) * 4.5, yaw: b.rot, pitch: 0.24 }; }),
 ];
-type NearKey = Kind | 'console' | null;
+type Aim = { pileId?: string; tokenId?: string; console?: boolean; pet?: 'cat' | 'dog'; team?: number; emerg?: Emerg };
+type Fun = {
+  meowKey: number; barkKey: number; onPet: (p: 'cat' | 'dog') => void; marks: { cat: React.MutableRefObject<SVGCircleElement | null>; dog: React.MutableRefObject<SVGCircleElement | null> };
+  talk: number | null; onTeam: (i: number) => void; emerg: Emerg | null; onEmerg: (e: Emerg) => void;
+};
+type NearKey = Kind | 'console' | 'test' | `team${number}` | null;
 
 function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; phase: React.MutableRefObject<number> }) {
   const legL = useRef<THREE.Group>(null); const legR = useRef<THREE.Group>(null);
@@ -1802,7 +2136,7 @@ function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; pha
 
 function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAim }: {
   person: Person; warp: Warp; onMove: (x: number, z: number, yaw: number) => void; onNear: (key: NearKey) => void;
-  onAim: (hit: { pileId?: string; tokenId?: string; console?: boolean; cat?: boolean }) => void;
+  onAim: (hit: Aim) => void;
   onInteract: () => void; onTogglePerson: () => void;
 }) {
   const camera = useThree((s) => s.camera);
@@ -1849,8 +2183,9 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
       ray.setFromCamera(centre, camera);
       for (const hit of ray.intersectObjects(scene.children, true)) {
         let o: THREE.Object3D | null = hit.object;
-        while (o && !o.userData.pileId && !o.userData.tokenId && !o.userData.console && !o.userData.cat) o = o.parent;
-        if (o) { cbs.current.onAim({ pileId: o.userData.pileId, tokenId: o.userData.tokenId, console: o.userData.console, cat: o.userData.cat }); return; }
+        const keyOf = (u: Record<string, unknown>) => u.pileId || u.tokenId || u.console || u.pet || u.emerg || u.team !== undefined;
+        while (o && !keyOf(o.userData)) o = o.parent;
+        if (o) { const u = o.userData; cbs.current.onAim({ pileId: u.pileId, tokenId: u.tokenId, console: u.console, pet: u.pet, team: u.team, emerg: u.emerg }); return; }
       }
     };
     document.addEventListener('mousedown', shoot);
@@ -1907,6 +2242,8 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
     let nk: NearKey = null;
     for (const kind of KINDS) if (Math.hypot(p.x - CRATE[kind].x, p.z - CRATE[kind].z) < 3.3) nk = kind;
     if (Math.hypot(p.x - CONSOLE.x, p.z - CONSOLE.z) < 2.4) nk = 'console';
+    if (Math.hypot(p.x - TEST_PANEL.x, p.z - TEST_PANEL.z) < 2.0) nk = 'test';
+    TEAM.forEach((m, i) => { if (Math.hypot(p.x - m.x, p.z - m.z) < 1.8) nk = `team${i}`; });
     if (nk !== near.current) { near.current = nk; cbs.current.onNear(nk); }
   });
   return <group ref={avatar} visible={false}><Worker moving={moving} phase={phase} /></group>;
@@ -2201,7 +2538,7 @@ function useBoardData() {
 }
 
 // Top-down map of the line; the player marker is moved directly (no re-render per frame).
-function MiniMap({ markerRef, catRef, alert }: { markerRef: React.MutableRefObject<SVGGElement | null>; catRef: React.MutableRefObject<SVGCircleElement | null>; alert: Props['alert'] }) {
+function MiniMap({ markerRef, catRef, dogRef, alert }: { markerRef: React.MutableRefObject<SVGGElement | null>; catRef: React.MutableRefObject<SVGCircleElement | null>; dogRef: React.MutableRefObject<SVGCircleElement | null>; alert: Props['alert'] }) {
   const line = (a: THREE.Vector3, b: THREE.Vector3, cls: string, key: string) => <line key={key} x1={a.x} y1={a.z} x2={b.x} y2={b.z} className={cls} />;
   return <svg className="lv3d-map" viewBox="-24 -15 48 32" aria-hidden="true">
     <rect x={-24} y={-15} width={48} height={32} className="bg" />
@@ -2217,7 +2554,10 @@ function MiniMap({ markerRef, catRef, alert }: { markerRef: React.MutableRefObje
     <rect x={CONSOLE.x - 1.3} y={CONSOLE.z - 0.45} width={2.6} height={0.9} className="console" />
     {alert && <circle cx={SIREN_AT.x} cy={SIREN_AT.z} r={1.6} className={`alert ${alert}`} />}
     {TREES.map((t, i) => <circle key={i} cx={t.x} cy={t.z} r={0.9 * t.s} className="tree" />)}
+    <rect x={TEST_PANEL.x - 1.1} y={TEST_PANEL.z - 0.45} width={2.2} height={0.9} className="test" />
+    {TEAM.map((m) => <circle key={m.letter} cx={m.x} cy={m.z} r={0.5} fill={m.color} className="member"><title>{m.name}</title></circle>)}
     <circle ref={catRef} cx={0} cy={0} r={0.55} className="cat"><title>แมวส้ม</title></circle>
+    <circle ref={dogRef} cx={0} cy={0} r={0.5} className="dog"><title>ชิวาว่า</title></circle>
     <g ref={markerRef}><path d="M0 -1.1 L0.75 0.8 L0 0.35 L-0.75 0.8 Z" className="me" /></g>
   </svg>;
 }
@@ -2249,6 +2589,7 @@ function CratePanel({ kind, count, crates, recent, onClose }: { kind: Kind; coun
 
 // ---- Camera presets / follow ----------------------------------------------------------------------
 type PresetKey = 'overview' | 'gate' | 'fork' | 'top';
+const TIME_MODES: ['auto' | number, string][] = [['auto', 'เวลาจริง (ไทย)'], [6.2, 'เช้ามืด 06:12'], [7.5, 'เช้า 07:30'], [10, 'สาย 10:00'], [12, 'เที่ยง 12:00'], [15, 'บ่าย 15:00'], [17.3, 'เย็น 17:18'], [18.8, 'พลบค่ำ 18:48'], [21, 'กลางคืน 21:00'], [2, 'ดึก 02:00']];
 const PRESETS: Record<PresetKey, { label: string; pos: [number, number, number]; target: [number, number, number] }> = {
   overview: { label: 'ภาพรวม', pos: [-0.6, 12.6, 19.6], target: [-0.6, 2.2, -3.0] },
   gate: { label: 'ประตูสแกน', pos: [-8.9, 3.7, 5.6], target: [-5, 1.15, 0] },
@@ -2316,8 +2657,11 @@ export default function LiveScene3D(props: Props) {
   const autoDown = quality === 'low';
   const q = QUALITY[quality];
 
-  const [hour, setHour] = useState(bangkokHour);
+  const [clockHour, setHour] = useState(bangkokHour);
   useEffect(() => { const id = window.setInterval(() => setHour(bangkokHour()), 30000); return () => window.clearInterval(id); }, []);
+  // time of day: Thai clock by default, or a fixed time picked from the menu (only the lighting changes)
+  const [timeMode, setTimeMode] = useState<'auto' | number>('auto');
+  const hour = timeMode === 'auto' ? clockHour : timeMode;
   const env = useMemo(() => envAt(hour, props.tv), [hour, props.tv]);
 
   const [cam, setCam] = useState<{ key: PresetKey | null; nonce: number }>({ key: 'overview', nonce: 0 });
@@ -2340,7 +2684,21 @@ export default function LiveScene3D(props: Props) {
   const nearRef = useRef(near); nearRef.current = near;
   const [crateOpen, setCrateOpen] = useState<Kind | null>(null);
   const [meowKey, setMeowKey] = useState(0);
-  const onCat = () => setMeowKey((k) => k + 1);
+  const [barkKey, setBarkKey] = useState(0);
+  const onPet = (p: 'cat' | 'dog') => (p === 'cat' ? setMeowKey : setBarkKey)((k) => k + 1);
+  const [teamOpen, setTeamOpen] = useState<number | null>(null);
+  const onTeam = (i: number) => { unlockMouse(); setCrateOpen(null); setTeamOpen(i); };
+  // emergency drills (visual only, ends by itself after EMERG_SEC)
+  const [emerg, setEmerg] = useState<{ kind: Emerg; until: number } | null>(null);
+  const [testMenu, setTestMenu] = useState(false);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!emerg) return;
+    const id = window.setInterval(() => { if (Date.now() >= emerg.until) setEmerg(null); else tick((n) => n + 1); }, 1000);
+    return () => window.clearInterval(id);
+  }, [emerg]);
+  const onEmerg = (k: Emerg) => { setTestMenu(false); setEmerg((cur) => (cur?.kind === k ? null : { kind: k, until: Date.now() + EMERG_SEC * 1000 })); };
+  const dogMarker = useRef<SVGCircleElement | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const marker = useRef<SVGGElement | null>(null);
   const catMarker = useRef<SVGCircleElement | null>(null);
@@ -2387,13 +2745,17 @@ export default function LiveScene3D(props: Props) {
   const interact = () => {
     const k = nearRef.current; if (!k) return;
     if (k === 'console') { pressConsole(); return; }
-    unlockMouse(); setCrateOpen(k);
+    if (k === 'test') { unlockMouse(); setTestMenu(true); return; }
+    if (k.startsWith('team')) { onTeam(Number(k.slice(4))); return; }
+    unlockMouse(); setCrateOpen(k as Kind);
   };
   const pileIndex = useRef(new Map<string, Piled>());
   const onPile = (p: Piled) => setPick({ token: p.token ?? { id: p.id, kind: p.kind, fruit: p.fruit, count: 1, conf: null, defectType: p.defectType, track: null, spawnedAt: 0, seed: true }, landed: true, follow: false });
-  const onAim = (hit: { pileId?: string; tokenId?: string; console?: boolean; cat?: boolean }) => {
+  const onAim = (hit: Aim) => {
     if (hit.console) { pressConsole(); return; }
-    if (hit.cat) { onCat(); return; }
+    if (hit.pet) { onPet(hit.pet); return; }
+    if (hit.team !== undefined) { onTeam(hit.team); return; }
+    if (hit.emerg) { onEmerg(hit.emerg); return; }
     const p = hit.pileId ? pileIndex.current.get(hit.pileId) : undefined;
     if (p) { onPile(p); return; }
     const t = hit.tokenId ? props.tokens.find((x) => x.id === hit.tokenId) : undefined;
@@ -2418,18 +2780,20 @@ export default function LiveScene3D(props: Props) {
 
   // Esc: close the crate panel, then release a followed fruit, then leave walk mode (mouse already free)
   useEffect(() => {
-    if (!crateOpen && !picked && !(walk && !locked)) return;
+    if (!crateOpen && !picked && teamOpen == null && !testMenu && !(walk && !locked)) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       e.stopPropagation();
-      if (crateOpen) setCrateOpen(null);
+      if (testMenu) setTestMenu(false);
+      else if (teamOpen != null) setTeamOpen(null);
+      else if (crateOpen) setCrateOpen(null);
       else if (picked) setPick(null);
       else exitWalk();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [crateOpen, picked, walk, locked]);
+  }, [crateOpen, picked, walk, locked, teamOpen, testMenu]);
   const goPreset = (key: PresetKey) => { setPick((p) => (p ? { ...p, follow: false } : p)); setCam((c) => ({ key, nonce: c.nonce + 1 })); };
   const pt = pick?.token;
   const live = pt ? props.tokens.find((t) => t.id === pt.id) : undefined;
@@ -2441,7 +2805,7 @@ export default function LiveScene3D(props: Props) {
     <Canvas className="lv3d-canvas" shadows dpr={[1, q.dpr]} camera={{ position: PRESETS.overview.pos, fov: 36 }} gl={{ antialias: true, powerPreference: 'high-performance' }}
       onPointerMissed={() => { if (!walk) setPick(null); }}>
       <PerformanceMonitor onDecline={decline} flipflops={3} />
-      <Line {...props} meowKey={meowKey} onCat={onCat} catMarker={catMarker} boardData={boardData} onConsole={pressConsole} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
+      <Line {...props} fun={{ meowKey, barkKey, onPet, marks: { cat: catMarker, dog: dogMarker }, talk: teamOpen, onTeam, emerg: emerg?.kind ?? null, onEmerg: (k) => { unlockMouse(); onEmerg(k); } }} boardData={boardData} onConsole={pressConsole} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
       {walk
         ? <Walker person={person} warp={warp} onMove={onMove} onNear={setNear} onInteract={interact} onTogglePerson={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))} onAim={onAim} />
         : <>
@@ -2459,6 +2823,7 @@ export default function LiveScene3D(props: Props) {
     {!walk && <div className="lv3d-cams" role="group" aria-label="มุมกล้อง">
       {(Object.keys(PRESETS) as PresetKey[]).map((key) => <button key={key} type="button" className={cam.key === key ? 'on' : ''} onClick={() => goPreset(key)}>{PRESETS[key].label}</button>)}
       <button type="button" className="walk" onClick={enterWalk}>เดินสำรวจ</button>
+      <button type="button" className={`drill ${emerg ? 'on' : ''}`} onClick={() => setTestMenu((v) => !v)}>จำลองเหตุฉุกเฉิน</button>
       <span>คลิกผลไม้ (บนสายพานหรือในลัง) / ตะกร้าเพื่อดูข้อมูล</span>
     </div>}
     {walk && <>
@@ -2470,7 +2835,7 @@ export default function LiveScene3D(props: Props) {
         <button type="button" onClick={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))}>{person === 'first' ? 'มุมบุคคลที่ 3' : 'มุมบุคคลที่ 1'}</button>
         <button type="button" className="exit" onClick={exitWalk}>ออกจากโหมดเดิน</button>
       </div>
-      <MiniMap markerRef={marker} catRef={catMarker} alert={props.alert} />
+      <MiniMap markerRef={marker} catRef={catMarker} dogRef={dogMarker} alert={props.alert} />
       {locked && person === 'first' && <div className="lv3d-cross" />}
       {!locked && !crateOpen && altFree && <div className="lv3d-free">เมาส์อิสระ · กด <kbd>Alt</kbd> อีกครั้ง (หรือคลิกที่ฉาก) เพื่อซ่อนเมาส์และเดินต่อ</div>}
       {!locked && !crateOpen && !altFree && <div className="lv3d-walk-help">
@@ -2481,19 +2846,39 @@ export default function LiveScene3D(props: Props) {
           <li><kbd>W A S D</kbd> เดิน · <kbd>Shift</kbd> วิ่ง · <kbd>Space</kbd> กระโดด</li>
           <li>เมาส์ หันมอง · <kbd>V</kbd> สลับมุมบุคคลที่ 1 / 3</li>
           <li><kbd>E</kbd> ดูข้อมูลตะกร้าเมื่ออยู่ใกล้ · <kbd>Alt</kbd> สลับเมาส์โผล่ / ซ่อน · <kbd>Esc</kbd> ปล่อยเมาส์</li>
-          <li>เจอแมวส้มเดินเล่นอยู่ คลิก (หรือเล็งกากบาทแล้วคลิก) เพื่อทักทาย</li>
+          <li>เดินไปหาทีมงาน (A-D) แล้วกด <kbd>E</kbd> ดูชื่อและหน้าที่ · คลิกแมว/หมาเพื่อทักทาย</li>
+          <li>แผงเหลืองข้างโต๊ะควบคุม = จำลองเหตุฉุกเฉิน (แค่ภาพ ไม่กระทบระบบ)</li>
         </ul>
       </div>}
-      {near && !crateOpen && <div className="lv3d-prompt">{near === 'console'
+      {near && !crateOpen && teamOpen == null && !testMenu && <div className="lv3d-prompt">{near === 'console'
         ? (props.control.isAdmin ? <>กด <kbd>E</kbd> {props.control.paused ? 'สั่งทำงานต่อ' : 'สั่งหยุดจากเว็บ'} (มีหน้ายืนยัน)</> : 'ห้องควบคุม · ปุ่มใช้ได้เฉพาะ admin')
+        : near === 'test' ? <>กด <kbd>E</kbd> เปิดเมนูจำลองเหตุฉุกเฉิน</>
+        : near.startsWith('team') ? <>กด <kbd>E</kbd> คุยกับ {TEAM[Number(near.slice(4))].nick}</>
         : <>กด <kbd>E</kbd> ดูข้อมูล{near === 'good' ? 'ตะกร้าดี' : 'ตะกร้าเสีย'}</>}</div>}
     </>}
 
     <div className="lv3d-opts">
       <span className="lv3d-clock" title="แสงในฉากเปลี่ยนตามเวลาไทย"><DayIcon size={12} />{env.label} {env.clock}</span>
+      <select className="lv3d-time" aria-label="เวลาในฉาก" value={String(timeMode)} onChange={(e) => { setTimeMode(e.target.value === 'auto' ? 'auto' : Number(e.target.value)); e.currentTarget.blur(); }}>
+        {TIME_MODES.map(([v, label]) => <option key={String(v)} value={String(v)}>{label}</option>)}
+      </select>
       {autoDown && <em className="lv3d-auto" title="เครื่องกระตุก ปิดเงาและแสงเรืองชั่วคราว">กราฟิกลดอัตโนมัติ</em>}
     </div>
     {toast && <div className="lv3d-toast">{toast}</div>}
+    {emerg && <div className="lv3d-emerg" role="status" style={{ ['--c' as string]: EMERG[emerg.kind].color }}>
+      <b>จำลองเหตุ: {EMERG[emerg.kind].label}</b>
+      <span>{EMERG[emerg.kind].desc} · โหมดทดสอบ แค่ภาพในฉาก ไม่ส่งคำสั่งและไม่กระทบระบบจริง · เหลือ {Math.max(0, Math.ceil((emerg.until - Date.now()) / 1000))} วิ</span>
+      <button type="button" onClick={() => setEmerg(null)}>ยกเลิก</button>
+    </div>}
+    {testMenu && <div className="lv3d-test" role="dialog" aria-label="จำลองเหตุฉุกเฉิน">
+      <div className="lv3d-pick-head"><b>จำลองเหตุฉุกเฉิน</b><span>ทดสอบเท่านั้น · ไม่กระทบระบบ</span>
+        <button type="button" title="ปิด (Esc)" onClick={() => setTestMenu(false)}><X size={13} /></button></div>
+      {EMERG_KEYS.map((k) => <button key={k} type="button" className={emerg?.kind === k ? 'on' : ''} style={{ ['--c' as string]: EMERG[k].color }} onClick={() => onEmerg(k)}>
+        <b>{EMERG[k].label}</b><span>{EMERG[k].desc}</span>
+      </button>)}
+      {emerg && <button type="button" className="stop" onClick={() => { setEmerg(null); setTestMenu(false); }}>หยุดการจำลอง</button>}
+    </div>}
+    {teamOpen != null && <TeamCard i={teamOpen} onClose={() => setTeamOpen(null)} />}
     {crateOpen && <CratePanel kind={crateOpen} count={props.bins[crateOpen]} crates={props.crates} recent={recent[crateOpen]} onClose={() => setCrateOpen(null)} />}
 
     {pt && <div className={`lv3d-pick ${pt.kind}`}>
