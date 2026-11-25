@@ -802,9 +802,9 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 .lv3d-cams button.drill { background: #3a2a10; color: #ffd27a; }
 .lv3d-cams button.drill.on { background: #e5453a; color: #fff; animation: lv3dDrill 1s steps(2) infinite; }
 @keyframes lv3dDrill { 50% { background: #7a1a14; } }
-.lv3d-emerg { position: absolute; left: 50%; top: 2.5%; z-index: 9; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; max-width: 86%; padding: 8px 10px 8px 14px; border-radius: 12px; background: rgba(20,8,6,.88); border: 2px solid var(--c); color: #fff; font-size: 12px; box-shadow: 0 0 22px var(--c); }
+.lv3d-emerg { position: absolute; left: 50%; top: 2.5%; z-index: 9; transform: translateX(-50%); display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; width: max-content; max-width: min(720px, 94%); padding: 8px 10px 8px 14px; border-radius: 12px; background: rgba(20,8,6,.88); border: 2px solid var(--c); color: #fff; font-size: 12px; box-shadow: 0 0 22px var(--c); }
 .lv3d-emerg b { color: var(--c); font-size: 14px; white-space: nowrap; }
-.lv3d-emerg span { color: #f1d9d3; line-height: 1.4; }
+.lv3d-emerg span { flex: 1 1 240px; min-width: 0; color: #f1d9d3; line-height: 1.4; font-size: 11px; }
 .lv3d-emerg button { border: 0; border-radius: 8px; padding: 6px 12px; background: #fff; color: #7a1a14; font: 900 12px var(--font-thai), sans-serif; cursor: pointer; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .lv3d-cams button.drill.on { animation: none; } }
 .lv3d-test { position: absolute; left: 50%; top: 50%; z-index: 10; transform: translate(-50%, -50%); width: min(380px, 90%); padding: 12px; border-radius: 14px; background: rgba(8,20,16,.94); color: #e8f5ef; box-shadow: 0 12px 34px rgba(0,0,0,.4); display: flex; flex-direction: column; gap: 6px; }

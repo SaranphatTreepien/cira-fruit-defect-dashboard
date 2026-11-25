@@ -14,9 +14,13 @@ type Kind = 'good' | 'defect';
 export type Fruit3D = {
   id: string; kind: Kind; fruit: string | null; count: number; conf: number | null;
   defectType: string | null; track: number | null; spawnedAt: number;
+  holdP?: number | null; // held by an emergency drill (SimulateView): goes no further than this share of the trip
   model?: string | null; ts?: string | null;
   seed?: boolean; // filler fruit drawn from the window totals (no event behind it)
 };
+
+// Share of the trip a fruit has done (an emergency drill can hold it).
+const progress = (t: Fruit3D, travelMs: number) => Math.min((Date.now() - t.spawnedAt) / travelMs, t.holdP ?? Infinity);
 
 type Props = {
   tokens: Fruit3D[];
@@ -37,6 +41,8 @@ type Props = {
   system: { db: string; mqtt: string; internet: string; heartbeatAge: number | null; ingestAvg: number | null; ingestMax: number | null; dbToScreen: number | null; lastEventAgo: number | null };
   // machine state as CIRA CORE reports it (read only: the dashboard does not start or stop the machine)
   control: { device: string | null; machine: 'loading' | 'running' | 'paused' | 'stopped' };
+  // an emergency drill started (its kind) or ended (null): SimulateView holds the replay meanwhile
+  onDrill?: (kind: string | null) => void;
 };
 
 // ---- Graphics quality ---------------------------------------------------------------------------
@@ -302,7 +308,7 @@ function MovingFruit({ token, travelMs, pileTarget, selected, onPick, registry, 
     return () => { map.delete(token.id); gl.domElement.style.cursor = ''; };
   }, [registry, token.id, pos, gl]);
   useFrame(({ clock }) => {
-    const p = Math.min(1, (Date.now() - token.spawnedAt) / travelMs);
+    const p = Math.min(1, progress(token, travelMs));
     fruitPos(p, token.kind, pileTarget, pos);
     const g = ref.current;
     if (g) { g.position.copy(pos); g.visible = p > 0.005; }
@@ -787,7 +793,8 @@ function CrateLabel({ kind, count, last, hit, fill, swapping }: { kind: Kind; co
 type LineProps = Props & { fun: Fun; boardData: BoardData | null; env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
 
 function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, crates, system, control, fun, boardData, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
-  const speed = useRef(0);
+  const speed = useRef(0); // main belt, elevator and truck
+  const speedB = useRef(0); // the two branches after the fork
   const power = useRef(0);
   const emDef = fun.emerg ? EMERG[fun.emerg] : null;
   const dim = fun.emerg === 'power' ? 0.3 : 1; // power-cut drill: daylight through the openings only
@@ -854,7 +861,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
   useEffect(() => {
     const now = new Map(tokens.map((t) => [t.id, t]));
     const landed: Fruit3D[] = [];
-    prev.current.forEach((t, id) => { if (!now.has(id) && Date.now() - t.spawnedAt >= travelMs * 0.9) landed.push(t); });
+    prev.current.forEach((t, id) => { if (!now.has(id) && progress(t, travelMs) >= 0.9) landed.push(t); });
     prev.current = now;
     if (!landed.length) return;
     setPile((cur) => {
@@ -902,9 +909,15 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
 
   const tmp = useMemo(() => new THREE.Vector3(), []);
   useFrame((_, dt) => {
-    const k = 1 - Math.exp(-dt * 1.6);
-    speed.current += ((playing ? 3.6 : 0) - speed.current) * k;
-    power.current += ((playing ? 1 : 0.12) - power.current) * (1 - Math.exp(-dt * 2.2));
+    // drills: e-stop / fire stop at once, a power cut winds down, a jam stops the main belt, a camera fault slows it
+    const em = fun.emerg;
+    const allStop = em === 'estop' || em === 'fire' || em === 'power';
+    const mainT = !playing || allStop || em === 'jam' ? 0 : em === 'camera' ? 1.2 : 3.6;
+    const branchT = !playing || allStop ? 0 : 3.6;
+    const k = 1 - Math.exp(-dt * (em === 'estop' || em === 'fire' ? 9 : em === 'power' ? 0.7 : 1.6));
+    speed.current += (mainT - speed.current) * k;
+    speedB.current += (branchT - speedB.current) * k;
+    power.current += ((playing && em !== 'power' ? 1 : 0.12) - power.current) * (1 - Math.exp(-dt * 2.2));
     const sincePower = (performance.now() - powerKick.current) / 1000;
     const flash = sincePower < 1.2 ? Math.sin(Math.min(1, sincePower / 1.2) * Math.PI) * 1.6 : 0;
     const pw = power.current + flash;
@@ -920,7 +933,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     // which fruit is under the camera right now (laser target) and which one just got its verdict
     let active = false; let flashK = 0; let flashDefect = false;
     for (const t of tokens) {
-      const p = (Date.now() - t.spawnedAt) / travelMs;
+      const p = progress(t, travelMs);
       if (p > SCAN[0] && p < SCAN[1]) { active = true; scan.current.x = fruitPos(p, t.kind, CRATE[t.kind], tmp).x; scan.current.defect = t.kind === 'defect'; }
       else if (p >= SCAN[1] && p < SCAN[1] + 0.06) { const f = 1 - (p - SCAN[1]) / 0.06; if (f > flashK) { flashK = f; flashDefect = t.kind === 'defect'; } }
     }
@@ -960,8 +973,8 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     {fun.emerg === 'jam' && <JamWarning reduced={reduced} />}
 
     <Belt from={new THREE.Vector3(START.x - 0.6, 0, 0)} to={new THREE.Vector3(FORK.x + 0.4, 0, 0)} width={1.4} strip={mats.green} speed={speed} trim={[{ side: -1, end: 0.55 }, { side: 1, end: 0.55 }]} />
-    <Belt from={new THREE.Vector3(FORK.x, 0, -0.1)} to={END.good.clone().add(dirOf('good').multiplyScalar(0.35))} width={1.3} strip={mats.green} speed={speed} trim={[{ side: 1, start: 2.1 }]} />
-    <Belt from={new THREE.Vector3(FORK.x, 0, 0.1)} to={END.defect.clone().add(dirOf('defect').multiplyScalar(0.35))} width={1.3} strip={mats.orange} speed={speed} trim={[{ side: -1, start: 2.1 }]} lift={0.004} />
+    <Belt from={new THREE.Vector3(FORK.x, 0, -0.1)} to={END.good.clone().add(dirOf('good').multiplyScalar(0.35))} width={1.3} strip={mats.green} speed={speedB} trim={[{ side: 1, start: 2.1 }]} />
+    <Belt from={new THREE.Vector3(FORK.x, 0, 0.1)} to={END.defect.clone().add(dirOf('defect').multiplyScalar(0.35))} width={1.3} strip={mats.orange} speed={speedB} trim={[{ side: -1, start: 2.1 }]} lift={0.004} />
     <Gantry beam={mats.teal} cone={mats.cone} head={mats.head} scan={scan} reduced={reduced} fault={fun.emerg === 'camera'} />
     <Diverter paddleKey={paddleKey} mat={mats.paddle} />
     {KINDS.map((kind) => <StationCrate key={kind} kind={kind} rim={kind === 'good' ? mats.green : mats.orange} swap={swap[kind]} glow={1 + env.night * 1.5} onClick={onCrate} />)}
@@ -1932,11 +1945,11 @@ function TeamCard({ i, onClose }: { i: number; onClose: () => void }) {
 // Nothing here sends a command or writes data; counts and the replay keep running as usual.
 type Emerg = 'fire' | 'power' | 'jam' | 'camera' | 'estop';
 const EMERG: Record<Emerg, { label: string; color: string; level: 'warning' | 'critical'; desc: string }> = {
-  fire: { label: 'ไฟไหม้', color: '#ff3b2f', level: 'critical', desc: 'เปลวไฟและควันที่มุมโกดัง ไฟแดงหมุนรอบโกดัง' },
-  power: { label: 'ไฟดับ', color: '#ffd21f', level: 'warning', desc: 'ไฟในโกดังดับ เหลือไฟฉุกเฉินสีเหลือง' },
-  jam: { label: 'สายพานติด', color: '#ff9b2f', level: 'warning', desc: 'ไฟเตือนกะพริบตลอดสายพานหลัก' },
-  camera: { label: 'กล้องขัดข้อง', color: '#4f8dff', level: 'warning', desc: 'ไฟสถานะกล้องเป็นสีแดงกะพริบ' },
-  estop: { label: 'หยุดฉุกเฉิน', color: '#ff3b2f', level: 'critical', desc: 'ไฟแดงรอบโกดังและไซเรน' },
+  fire: { label: 'ไฟไหม้', color: '#ff3b2f', level: 'critical', desc: 'เปลวไฟที่มุมโกดัง สายพานหยุดทันที ผลไม้ค้างบนไลน์' },
+  power: { label: 'ไฟดับ', color: '#ffd21f', level: 'warning', desc: 'ไฟดับ สายพานค่อยๆ หยุด เหลือไฟฉุกเฉินสีเหลือง' },
+  jam: { label: 'สายพานติด', color: '#ff9b2f', level: 'warning', desc: 'สายพานหลักหยุด ผลไม้ต่อแถวหน้าประตูสแกน ที่ผ่านไปแล้ววิ่งต่อ' },
+  camera: { label: 'กล้องขัดข้อง', color: '#4f8dff', level: 'warning', desc: 'กล้องไฟแดง สายพานช้า ผลไม้รอสแกนในประตู' },
+  estop: { label: 'หยุดฉุกเฉิน', color: '#ff3b2f', level: 'critical', desc: 'ทุกสายพานหยุดทันที ไฟแดงรอบโกดังและไซเรน' },
 };
 const EMERG_KEYS = Object.keys(EMERG) as Emerg[];
 const EMERG_SEC = 30;
@@ -2706,6 +2719,12 @@ export default function LiveScene3D(props: Props) {
   // siren sound while a drill runs (the drill is started by a click, so the browser lets it play); can be muted
   const [sirenMuted, setSirenMuted] = useState(false);
   const emergKind = emerg?.kind ?? null;
+  const onDrill = props.onDrill;
+  useEffect(() => {
+    onDrill?.(emergKind);
+    return () => onDrill?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emergKind]);
   useEffect(() => {
     if (!emergKind || sirenMuted) return;
     return startSiren(EMERG[emergKind].level === 'critical' ? 'wail' : 'hilo');
@@ -2773,7 +2792,7 @@ export default function LiveScene3D(props: Props) {
   useEffect(() => {
     const now = new Map(props.tokens.map((t) => [t.id, t]));
     const landed: Fruit3D[] = [];
-    prevTokens.current.forEach((t, id) => { if (!now.has(id) && Date.now() - t.spawnedAt >= props.travelMs * 0.9) landed.push(t); });
+    prevTokens.current.forEach((t, id) => { if (!now.has(id) && progress(t, props.travelMs) >= 0.9) landed.push(t); });
     prevTokens.current = now;
     if (!landed.length) return;
     setRecent((r) => ({
@@ -2801,7 +2820,7 @@ export default function LiveScene3D(props: Props) {
   const goPreset = (key: PresetKey) => { setPick((p) => (p ? { ...p, follow: false } : p)); setCam((c) => ({ key, nonce: c.nonce + 1 })); };
   const pt = pick?.token;
   const live = pt ? props.tokens.find((t) => t.id === pt.id) : undefined;
-  const stage = !pt ? '' : pick?.landed ? `ลงตะกร้า${pt.kind === 'good' ? 'ดี' : 'เสีย'}แล้ว` : live && (Date.now() - live.spawnedAt) / props.travelMs < SCAN[1] ? 'กำลังสแกน' : `กำลังไปตะกร้า${pt.kind === 'good' ? 'ดี' : 'เสีย'}`;
+  const stage = !pt ? '' : pick?.landed ? `ลงตะกร้า${pt.kind === 'good' ? 'ดี' : 'เสีย'}แล้ว` : live && progress(live, props.travelMs) < SCAN[1] ? 'กำลังสแกน' : `กำลังไปตะกร้า${pt.kind === 'good' ? 'ดี' : 'เสีย'}`;
   const DayIcon = env.icon === 'sun' ? Sun : env.icon === 'rise' ? Sunrise : env.icon === 'set' ? Sunset : Moon;
 
   return <div ref={rootRef} className={`lv3d-root ${walk ? 'walking' : ''}`}
@@ -2871,7 +2890,7 @@ export default function LiveScene3D(props: Props) {
     {toast && <div className="lv3d-toast">{toast}</div>}
     {emerg && <div className="lv3d-emerg" role="status" style={{ ['--c' as string]: EMERG[emerg.kind].color }}>
       <b>จำลองเหตุ: {EMERG[emerg.kind].label}</b>
-      <span>{EMERG[emerg.kind].desc} · โหมดทดสอบ แค่ภาพในฉาก ไม่ส่งคำสั่งและไม่กระทบระบบจริง · เหลือ {Math.max(0, Math.ceil((emerg.until - Date.now()) / 1000))} วิ</span>
+      <span>{EMERG[emerg.kind].desc} · โหมดทดสอบ: ภาพและตัวเลขบนจอรอไว้ จบแล้วไล่ตาม · ไม่ส่งคำสั่ง ข้อมูลจริงไม่หาย · เหลือ {Math.max(0, Math.ceil((emerg.until - Date.now()) / 1000))} วิ</span>
       <button type="button" className="mute" title={sirenMuted ? 'เปิดเสียงไซเรน' : 'ปิดเสียงไซเรน'} aria-pressed={!sirenMuted} onClick={() => setSirenMuted((v) => !v)}>{sirenMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}</button>
       <button type="button" onClick={() => setEmerg(null)}>ยกเลิก</button>
     </div>}

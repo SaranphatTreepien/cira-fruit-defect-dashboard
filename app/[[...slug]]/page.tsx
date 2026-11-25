@@ -244,7 +244,8 @@ type LiveHealth = { db: string; mqtt: string; internet: string };
 // One fruit on the belt (or a bundle of same-result fruit when the line is faster than the belt can show).
 // Each event is replayed at its CORE timestamp + a playback offset, so fruit flow one by one instead of
 // arriving as one pile per DB batch.
-type LiveToken = { id: string; batch: string; kind: 'good' | 'defect'; fruit: string | null; count: number; conf: number | null; defectType: string | null; track: number | null; model: string | null; ts: string | null; modelSwitch: { from: string; to: string } | null; spawnedAt: number };
+type LiveToken = { id: string; batch: string; kind: 'good' | 'defect'; fruit: string | null; count: number; conf: number | null; defectType: string | null; track: number | null; model: string | null; ts: string | null; modelSwitch: { from: string; to: string } | null; spawnedAt: number;
+  holdP?: number | null }; // held by an emergency drill: the fruit goes no further than this share of the trip
 type LivePending = LiveToken & { at: number };
 
 const liveWindows = [{ v: 5, label: '5 นาที' }, { v: 15, label: '15 นาที' }, { v: 60, label: '1 ชม.' }, { v: 480, label: '8 ชม.' }, { v: 1440, label: '24 ชม.' }];
@@ -254,6 +255,10 @@ const LIVE_BACKLOG_MERGE = 10; // more due fruit than this: bundle them so the b
 const LIVE_PLAYBACK_MARGIN_MS = 350;
 const LIVE_TRAVEL_MS = 3400; // 2D: must match .lv-token animation-duration in globals.css
 const LIVE_TRAVEL_3D_MS = 6000; // 3D: longer belts, slower fruit
+// Emergency drills in the 3D scene hold the replay (nothing is written; the picture and the crate counters wait,
+// then catch up). null = every belt stops; a number = fruit queue up before that share of the trip.
+const DRILL_HOLD: Record<string, number | null> = { fire: null, power: null, estop: null, jam: 0.13, camera: 0.2 };
+const DRILL_QUEUE_GAP = 0.014; // spacing of queued fruit (share of the trip)
 const liveTime = (value: string | null) => value ? new Intl.DateTimeFormat('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '-';
 const liveTimeTenth = (value: string | null) => {
   if (!value) return '-';
@@ -359,6 +364,40 @@ function SimulateView() {
   const [arrival, setArrival] = useState<{ e2e: number; dbToScreen: number; at: number } | null>(null);
   const lastSpawn = useRef(0);
   const landTimers = useRef<number[]>([]);
+  const tokensRef = useRef(tokens); tokensRef.current = tokens;
+  // per-fruit events already fired: 1 model banner, 2 paddle, 4 landed
+  const fired = useRef(new Map<string, number>());
+  const hold = useRef<{ at: number | null } | null>(null);
+  const queueSlot = useRef(0);
+  const progressOf = (t: LiveToken, now: number) => Math.min((now - t.spawnedAt) / travel.current, t.holdP ?? Infinity);
+  // Drill started / ended in the 3D scene: freeze the belt (or queue fruit at the jam), then let it run on.
+  const onDrill = (kind: string | null) => {
+    const now = Date.now();
+    if (kind && kind in DRILL_HOLD) {
+      const at = DRILL_HOLD[kind];
+      hold.current = { at };
+      setTokens((current) => {
+        let slot = at ?? 0;
+        const caps = new Map<string, number>();
+        [...current].sort((a, b) => progressOf(b, now) - progressOf(a, now)).forEach((t) => {
+          const p = progressOf(t, now);
+          if (at == null) { if (p < 0.88) caps.set(t.id, p); return; } // fruit already dropping into a crate still lands
+          if (p >= at) return; // past the jam: runs on to its crate
+          const cap = Math.max(p, Math.min(slot, at));
+          caps.set(t.id, cap); slot = cap - DRILL_QUEUE_GAP;
+        });
+        queueSlot.current = slot;
+        return current.map((t) => (caps.has(t.id) ? { ...t, holdP: caps.get(t.id)! } : t));
+      });
+    } else if (hold.current) {
+      hold.current = null;
+      setTokens((current) => current.map((t) => {
+        if (t.holdP == null) return t;
+        const p = progressOf(t, now);
+        return { ...t, holdP: null, spawnedAt: now - p * travel.current };
+      }));
+    }
+  };
   const later = (ms: number, fn: () => void) => { landTimers.current.push(window.setTimeout(fn, ms)); };
   // Live feed shows one row per DB batch; clicking a row loads that batch's events.
   const [openBatches, setOpenBatches] = useState<Record<string, LiveEvent[] | 'loading' | 'error'>>({});
@@ -466,8 +505,29 @@ function SimulateView() {
     if (!playing) { if (pending.current.length) { pending.current = []; setQueueVer((v) => v + 1); } return; }
     const id = window.setInterval(() => {
       const now = Date.now();
+      // model banner at 1/4 of the trip, paddle at 0.47, crate at the end (held fruit wait; works in hidden tabs too)
+      for (const t of tokensRef.current) {
+        const f = fired.current.get(t.id) ?? 0;
+        if (f & 4) continue;
+        const p = progressOf(t, now);
+        let next = f;
+        if (t.modelSwitch && !(f & 1) && p >= 0.25) {
+          const sw = t.modelSwitch; next |= 1;
+          setModelBanner({ key: Date.now(), ...sw }); sfx.play('switch');
+          later(6000, () => setModelBanner((b) => (b && b.to === sw.to ? null : b)));
+        }
+        if (t.kind === 'defect' && !(f & 2) && p >= 0.47) { next |= 2; setPaddleKey((k) => k + 1); }
+        if (p >= 1) { next |= 4; land(t); }
+        if (next !== f) fired.current.set(t.id, next);
+      }
+      if (fired.current.size > 400) {
+        const live = new Set(tokensRef.current.map((t) => t.id));
+        fired.current.forEach((_, k) => { if (!live.has(k)) fired.current.delete(k); });
+      }
       const queue = pending.current;
       if (!queue.length || queue[0].at > now || now - lastSpawn.current < LIVE_MIN_GAP_MS) return;
+      // drill: nothing new while the line is stopped; with a jam new fruit join the queue until it is full
+      if (hold.current && (hold.current.at == null || queueSlot.current < 0.01)) return;
       let due = 0;
       while (due < queue.length && queue[due].at <= now) due++;
       let out: LiveToken[];
@@ -489,20 +549,13 @@ function SimulateView() {
         pending.current = queue.slice(1);
       }
       lastSpawn.current = now;
-      out = out.map((t) => ({ ...t, spawnedAt: now }));
-      const travelMs = travel.current;
+      out = out.map((t) => {
+        if (!hold.current) return { ...t, spawnedAt: now };
+        const holdP = Math.max(0, queueSlot.current); queueSlot.current -= DRILL_QUEUE_GAP;
+        return { ...t, spawnedAt: now, holdP };
+      });
       setQueueVer((v) => v + 1);
       setTokens((current) => [...current, ...out.filter((t) => !current.some((c) => c.id === t.id))]);
-      out.forEach((token) => {
-        if (token.modelSwitch) {
-          const sw = token.modelSwitch;
-          later(travelMs * 0.25, () => { setModelBanner({ key: Date.now(), ...sw }); sfx.play('switch'); });
-          later(travelMs * 0.25 + 6000, () => setModelBanner((b) => (b && b.to === sw.to ? null : b)));
-        }
-        if (token.kind === 'defect') later(travelMs * 0.47, () => setPaddleKey((k) => k + 1));
-        // Timer (not animationend) so baskets stay correct even if the tab is hidden.
-        later(travelMs, () => land(token));
-      });
     }, 80);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -659,6 +712,7 @@ function SimulateView() {
                   state: !live ? 'กำลังโหลด' : playing ? 'กำลังทำงาน' : state === 'paused' ? 'หยุดชั่วคราว' : 'เครื่องหยุด' }}
                 system={{ db: health.db, mqtt: health.mqtt, internet: health.internet, heartbeatAge: live?.device?.age_sec ?? null, ingestAvg: ingest?.avg_s ?? null,
                   ingestMax: ingest?.max_s ?? null, dbToScreen: arrival?.dbToScreen ?? null, lastEventAgo }}
+                onDrill={onDrill}
                 control={{ device: live?.device?.device_id ?? null, machine: !live ? 'loading' : playing ? 'running' : state === 'paused' ? 'paused' : 'stopped' }} />}
               {view === '2d' && <>
               <svg className="lv-belts" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
