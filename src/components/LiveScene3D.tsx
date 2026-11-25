@@ -30,16 +30,19 @@ type Props = {
   // counts shown on the crate labels (already "totals - in flight" from SimulateView)
   bins: { good: number; defect: number; lastGood: string | null; lastDefect: string | null; hitGood: number; hitDefect: number };
   stats: { epm: number; defectRate: string; spark: { n: number; defect: number }[] };
+  // crate panel (window totals from /api/live) and the KPI wall board
+  crates: { windowLabel: string; byFruit: { fruit_type: string; good: number; defect: number; total: number }[]; byDefect: { defect_type: string; n: number }[] };
+  kpi: { total: number; good: number; defect: number; defectRate: string; epm: number; model: string | null; device: string | null; state: string; playing: boolean; windowLabel: string };
 };
 
 // ---- Graphics quality ---------------------------------------------------------------------------
+// One fixed level ("mid"); it only steps down to "low" by itself when the frame rate drops.
 export type Quality = 'low' | 'mid' | 'high';
 const QUALITY: Record<Quality, { label: string; shadows: boolean; shadowSize: number; bloom: boolean; dpr: number; smoke: number; burst: number; stars: number; waveLight: boolean }> = {
   low: { label: 'ต่ำ', shadows: false, shadowSize: 512, bloom: false, dpr: 1, smoke: 0, burst: 5, stars: 0, waveLight: false },
   mid: { label: 'กลาง', shadows: true, shadowSize: 1024, bloom: true, dpr: 1.25, smoke: 3, burst: 9, stars: 500, waveLight: true },
   high: { label: 'สูง', shadows: true, shadowSize: 2048, bloom: true, dpr: 1.75, smoke: 6, burst: 14, stars: 1400, waveLight: true },
 };
-const QUALITY_KEY = 'cira-live-3d-quality';
 type Q = (typeof QUALITY)[Quality];
 
 // ---- Line layout (world units) -------------------------------------------------------------
@@ -503,7 +506,7 @@ function CrateModel({ kind, rim }: { kind: Kind; rim: THREE.Material }) {
 type Swap = { start: number; carried: Piled[] | null };
 const SWAP = { arrive: 1800, pulled: 2600, dropFrom: 1950, dropTo: 2500, done: 4800 };
 
-function StationCrate({ kind, rim, swap, glow }: { kind: Kind; rim: THREE.Material; swap: Swap | null; glow: number }) {
+function StationCrate({ kind, rim, swap, glow, onClick }: { kind: Kind; rim: THREE.Material; swap: Swap | null; glow: number; onClick: (kind: Kind) => void }) {
   const ref = useRef<THREE.Group>(null);
   useFrame(() => {
     if (!ref.current) return;
@@ -516,7 +519,7 @@ function StationCrate({ kind, rim, swap, glow }: { kind: Kind; rim: THREE.Materi
   });
   const c = CRATE[kind];
   return <group position={[c.x, 0, c.z]} rotation={[0, crateAngle(kind), 0]}>
-    <group ref={ref}><CrateModel kind={kind} rim={rim} /></group>
+    <group ref={ref} onClick={(e) => { e.stopPropagation(); onClick(kind); }}><CrateModel kind={kind} rim={rim} /></group>
     <pointLight position={[0, CH + 0.6, 0]} intensity={2.2 * glow} distance={3.2} color={kind === 'good' ? '#5dffa4' : '#ffae55'} />
   </group>;
 }
@@ -574,6 +577,10 @@ function Agv({ kind, swap, rim }: { kind: Kind; swap: Swap; rim: THREE.Material 
   </>;
 }
 
+const TREES: { x: number; z: number; s: number; fruit: string }[] = [
+  { x: -9, z: -6.5, s: 1, fruit: 'orange' }, { x: -3, z: -7.5, s: 1.2, fruit: 'apple' }, { x: 3.5, z: -8, s: 1, fruit: 'orange' },
+  { x: 11.5, z: -7, s: 1.1, fruit: 'apple' }, { x: -12, z: 5, s: 0.9, fruit: 'apple' }, { x: -14, z: 1.5, s: 0.95, fruit: 'orange' },
+];
 function Tree({ x, z, s = 1, fruit }: { x: number; z: number; s?: number; fruit: string }) {
   const balls = useMemo(() => Array.from({ length: 8 }, (_, i) => {
     const a = i * 2.3; const r = 0.85 + (i % 2) * 0.2;
@@ -608,7 +615,7 @@ function Siren({ alert, reduced }: { alert: Props['alert']; reduced: boolean }) 
     beam.color.set(color);
     if (light.current) light.current.intensity = on ? (alert === 'critical' ? 26 : 16) * (reduced ? 0.7 : 0.55 + 0.45 * Math.sin(clock.elapsedTime * 5)) : 0;
   });
-  return <group position={[-2.4, 0, -1.6]}>
+  return <group position={[SIREN_AT.x, 0, SIREN_AT.z]}>
     <mesh position={[0, 0.06, 0]} castShadow><cylinderGeometry args={[0.24, 0.3, 0.12, 12]} /><meshStandardMaterial color="#3b4246" /></mesh>
     <mesh position={[0, 1.6, 0]} castShadow><cylinderGeometry args={[0.05, 0.06, 3.1, 8]} /><meshStandardMaterial color="#cfd8d3" metalness={0.4} roughness={0.4} /></mesh>
     <mesh position={[0, 3.2, 0]}><cylinderGeometry args={[0.2, 0.22, 0.1, 14]} /><meshStandardMaterial color="#2b3033" /></mesh>
@@ -734,9 +741,9 @@ function CrateLabel({ kind, count, last, hit, fill, swapping }: { kind: Kind; co
 }
 
 // ---- Scene --------------------------------------------------------------------------------------
-type LineProps = Props & { env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
+type LineProps = Props & { env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
 
-function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, env, q, reduced, pickId, onPick, registry }: LineProps) {
+function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, env, q, reduced, pickId, onPick, onCrate, registry }: LineProps) {
   const speed = useRef(0);
   const power = useRef(0);
   const scan = useRef<ScanState>({ active: 0, x: CAM.x, defect: false, flash: 0, flashDefect: false });
@@ -894,7 +901,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     <Belt from={new THREE.Vector3(FORK.x, 0, 0.1)} to={END.defect.clone().add(dirOf('defect').multiplyScalar(0.35))} width={1.3} strip={mats.orange} speed={speed} />
     <Gantry beam={mats.teal} cone={mats.cone} head={mats.head} scan={scan} reduced={reduced} />
     <Diverter paddleKey={paddleKey} mat={mats.paddle} />
-    {KINDS.map((kind) => <StationCrate key={kind} kind={kind} rim={kind === 'good' ? mats.green : mats.orange} swap={swap[kind]} glow={1 + env.night * 1.5} />)}
+    {KINDS.map((kind) => <StationCrate key={kind} kind={kind} rim={kind === 'good' ? mats.green : mats.orange} swap={swap[kind]} glow={1 + env.night * 1.5} onClick={onCrate} />)}
     {KINDS.map((kind) => swap[kind] && <Agv key={`agv-${kind}`} kind={kind} swap={swap[kind]!} rim={kind === 'good' ? mats.green : mats.orange} />)}
     <CrateLabel kind="good" count={bins.good} last={bins.lastGood} hit={bins.hitGood} fill={pile.good.length} swapping={!!swap.good} />
     <CrateLabel kind="defect" count={bins.defect} last={bins.lastDefect} hit={bins.hitDefect} fill={pile.defect.length} swapping={!!swap.defect} />
@@ -902,12 +909,8 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     <ModelWave modelKey={modelKey} reduced={reduced} withLight={q.waveLight} />
     <HoloPanel stats={stats} reduced={reduced} />
 
-    <Tree x={-9} z={-6.5} fruit="orange" />
-    <Tree x={-3} z={-7.5} s={1.2} fruit="apple" />
-    <Tree x={3.5} z={-8} fruit="orange" />
-    <Tree x={11.5} z={-7} s={1.1} fruit="apple" />
-    <Tree x={-12} z={5} s={0.9} fruit="apple" />
-    <Tree x={-14} z={1.5} s={0.95} fruit="orange" />
+    {TREES.map((t, i) => <Tree key={i} x={t.x} z={t.z} s={t.s} fruit={t.fruit} />)}
+    <KpiBoard kpi={kpi} />
 
     {tokens.map((t) => <MovingFruit key={t.id} token={t} travelMs={travelMs} pileTarget={targets.current.get(t.id) ?? CRATE[t.kind]}
       selected={pickId === t.id} onPick={onPick} registry={registry} q={q} reduced={reduced} />)}
@@ -916,6 +919,263 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     </group>))}
     {bursts.map((b) => <Burst key={b.key} at={b.at} color={b.color} count={q.burst} onDone={() => setBursts((cur) => cur.filter((x) => x.key !== b.key))} />)}
   </>;
+}
+
+// ---- Walk mode (first / third person) ------------------------------------------------------------
+// Pure viewing: the player only moves the camera around the line; nothing here writes data.
+const BOARD = { x: -7.2, z: -4.4, w: 4.4 };
+const SIREN_AT = { x: -2.4, z: -1.6 };
+const EYE = 1.6; const PLAYER_R = 0.35; const BOUND = 32;
+// Obstacles as capsules on the floor (a point when a = b): r = radius, h = height the player can jump over.
+type Capsule = { ax: number; az: number; bx: number; bz: number; r: number; h: number };
+function buildColliders(): Capsule[] {
+  const out: Capsule[] = [];
+  const cap = (ax: number, az: number, bx: number, bz: number, r: number, h = Infinity) => out.push({ ax, az, bx, bz, r, h });
+  cap(START.x - 0.6, 0, FORK.x + 0.4, 0, 0.85, 0.95);
+  for (const kind of KINDS) {
+    const end = END[kind].clone().add(dirOf(kind).multiplyScalar(0.35));
+    cap(FORK.x, 0, end.x, end.z, 0.8, 0.95);
+    cap(CRATE[kind].x, CRATE[kind].z, CRATE[kind].x, CRATE[kind].z, 1.25, 1.05);
+  }
+  for (const s of [-1, 1]) cap(CAM.x, s * 1.2, CAM.x, s * 1.2, 0.28);
+  for (const t of TREES) cap(t.x, t.z, t.x, t.z, 0.78 * t.s);
+  cap(HOLO.pos[0], HOLO.pos[2], HOLO.pos[0], HOLO.pos[2], 0.5);
+  cap(SIREN_AT.x, SIREN_AT.z, SIREN_AT.x, SIREN_AT.z, 0.32);
+  cap(BOARD.x - BOARD.w / 2, BOARD.z, BOARD.x + BOARD.w / 2, BOARD.z, 0.2);
+  return out;
+}
+let COLLIDERS: Capsule[] | null = null;
+
+type Person = 'first' | 'third';
+type Warp = { x: number; z: number; yaw: number; n: number };
+const WARPS: { key: string; label: string; x: number; z: number; yaw: number }[] = [
+  { key: 'start', label: 'จุดเริ่ม', x: -4, z: 6.5, yaw: 0 },
+  { key: 'gate', label: 'ประตูสแกน', x: -6.4, z: 2.7, yaw: -0.45 },
+  { key: 'fork', label: 'ทางแยก', x: 1.2, z: 2.6, yaw: 0.25 },
+  { key: 'good', label: 'ตะกร้าดี', x: CRATE.good.x - 2.7, z: CRATE.good.z + 0.4, yaw: -Math.PI / 2 + 0.15 },
+  { key: 'defect', label: 'ตะกร้าเสีย', x: CRATE.defect.x - 2.4, z: CRATE.defect.z + 0.9, yaw: -Math.PI / 2 + 0.36 },
+  { key: 'board', label: 'กระดาน KPI', x: BOARD.x, z: BOARD.z + 4.2, yaw: 0 },
+];
+
+function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; phase: React.MutableRefObject<number> }) {
+  const legL = useRef<THREE.Group>(null); const legR = useRef<THREE.Group>(null);
+  const armL = useRef<THREE.Group>(null); const armR = useRef<THREE.Group>(null);
+  useFrame(() => {
+    const s = Math.sin(phase.current) * 0.7 * moving.current;
+    if (legL.current) legL.current.rotation.x = s;
+    if (legR.current) legR.current.rotation.x = -s;
+    if (armL.current) armL.current.rotation.x = -s * 0.8;
+    if (armR.current) armR.current.rotation.x = s * 0.8;
+  });
+  const g = geo();
+  const pants = std('#2f4a6b', { flatShading: true }); const vest = std('#ff8a1f', { flatShading: true });
+  const skin = std('#e7b48a', { flatShading: true }); const helmet = std('#ffd21f', { roughness: 0.35, flatShading: true });
+  return <group>
+    {([[legL, -0.12], [legR, 0.12]] as const).map(([r, x]) => <group key={x} ref={r} position={[x, 0.82, 0]}>
+      <mesh geometry={g.box} position={[0, -0.4, 0]} scale={[0.17, 0.8, 0.19]} material={pants} castShadow />
+      <mesh geometry={g.box} position={[0, -0.79, -0.05]} scale={[0.19, 0.08, 0.3]} material={std('#2a2a2a')} castShadow />
+    </group>)}
+    <mesh geometry={g.box} position={[0, 1.13, 0]} scale={[0.5, 0.64, 0.28]} material={vest} castShadow />
+    <mesh geometry={g.box} position={[0, 1.08, 0]} scale={[0.52, 0.05, 0.3]} material={mat('reflect', () => new THREE.MeshBasicMaterial({ color: '#e8fff4', toneMapped: false }))} />
+    {([[armL, -0.33], [armR, 0.33]] as const).map(([r, x]) => <group key={x} ref={r} position={[x, 1.4, 0]}>
+      <mesh geometry={g.box} position={[0, -0.28, 0]} scale={[0.13, 0.58, 0.15]} material={vest} castShadow />
+      <mesh geometry={g.box} position={[0, -0.6, 0]} scale={[0.11, 0.1, 0.12]} material={skin} />
+    </group>)}
+    <mesh geometry={g.blob} position={[0, 1.62, 0]} scale={0.17} material={skin} castShadow />
+    <mesh position={[0, 1.68, 0]} material={helmet} castShadow><sphereGeometry args={[0.2, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2]} /></mesh>
+    <mesh position={[0, 1.685, -0.12]} scale={[1, 1, 0.6]} material={helmet}><cylinderGeometry args={[0.2, 0.2, 0.02, 10]} /></mesh>
+  </group>;
+}
+
+function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson }: {
+  person: Person; warp: Warp; onMove: (x: number, z: number, yaw: number) => void; onNear: (kind: Kind | null) => void;
+  onInteract: () => void; onTogglePerson: () => void;
+}) {
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+  const pos = useRef(new THREE.Vector3(warp.x, 0, warp.z));
+  const look = useRef({ yaw: warp.yaw, pitch: -0.05 });
+  const vy = useRef(0);
+  const keys = useRef(new Set<string>());
+  const moving = useRef(0); const phase = useRef(0);
+  const avatar = useRef<THREE.Group>(null);
+  const near = useRef<Kind | null>(null);
+  const cbs = useRef({ onMove, onNear, onInteract, onTogglePerson });
+  cbs.current = { onMove, onNear, onInteract, onTogglePerson };
+  const colliders = (COLLIDERS ??= buildColliders());
+  useEffect(() => { pos.current.set(warp.x, 0, warp.z); look.current = { yaw: warp.yaw, pitch: -0.05 }; vy.current = 0; }, [warp]);
+  useEffect(() => {
+    const prev = camera.rotation.order;
+    camera.rotation.order = 'YXZ';
+    // wider lens while walking (the overview uses a narrow 36°)
+    const persp = camera as THREE.PerspectiveCamera;
+    const prevFov = persp.fov; persp.fov = 62; persp.updateProjectionMatrix();
+    const typing = (e: KeyboardEvent) => e.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
+    const down = (e: KeyboardEvent) => {
+      if (typing(e)) return;
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+      if (e.code === 'KeyV' && !e.repeat) cbs.current.onTogglePerson();
+      if (e.code === 'KeyE' && !e.repeat) cbs.current.onInteract();
+      keys.current.add(e.code);
+    };
+    const up = (e: KeyboardEvent) => keys.current.delete(e.code);
+    const blur = () => keys.current.clear();
+    const mouse = (e: MouseEvent) => {
+      if (document.pointerLockElement !== gl.domElement) return;
+      look.current.yaw -= e.movementX * 0.0022;
+      look.current.pitch = THREE.MathUtils.clamp(look.current.pitch - e.movementY * 0.0022, -1.3, 1.2);
+    };
+    window.addEventListener('keydown', down); window.addEventListener('keyup', up); window.addEventListener('blur', blur);
+    document.addEventListener('mousemove', mouse);
+    return () => {
+      window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur);
+      document.removeEventListener('mousemove', mouse);
+      camera.rotation.order = prev;
+      persp.fov = prevFov; persp.updateProjectionMatrix();
+    };
+  }, [camera, gl]);
+  const fwd = useMemo(() => new THREE.Vector3(), []); const right = useMemo(() => new THREE.Vector3(), []);
+  const mv = useMemo(() => new THREE.Vector3(), []); const want = useMemo(() => new THREE.Vector3(), []);
+  useFrame((_, rawDt) => {
+    const dt = Math.min(rawDt, 0.05);
+    const k = keys.current; const { yaw, pitch } = look.current; const p = pos.current;
+    fwd.set(-Math.sin(yaw), 0, -Math.cos(yaw)); right.set(Math.cos(yaw), 0, -Math.sin(yaw));
+    const f = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
+    const s = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
+    mv.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(right, s);
+    const run = k.has('ShiftLeft') || k.has('ShiftRight');
+    if (mv.lengthSq() > 0) mv.normalize().multiplyScalar((run ? 6 : 3.2) * dt);
+    p.x += mv.x; p.z += mv.z;
+    // jump / gravity: belts (0.95) and crates (1.05) can be cleared with a running jump
+    if (k.has('Space') && p.y <= 0.001) vy.current = 7;
+    vy.current -= 18 * dt; p.y = Math.max(0, p.y + vy.current * dt);
+    if (p.y === 0) vy.current = Math.max(0, vy.current);
+    for (const c of colliders) {
+      if (p.y >= c.h) continue;
+      const dx = c.bx - c.ax; const dz = c.bz - c.az; const len = dx * dx + dz * dz;
+      const t = len ? clamp01(((p.x - c.ax) * dx + (p.z - c.az) * dz) / len) : 0;
+      const cx = c.ax + dx * t; const cz = c.az + dz * t;
+      const ox = p.x - cx; const oz = p.z - cz; const d = Math.hypot(ox, oz); const min = c.r + PLAYER_R;
+      if (d >= min) continue;
+      if (d < 1e-5) { p.x = cx + min; continue; }
+      p.x = cx + (ox / d) * min; p.z = cz + (oz / d) * min;
+    }
+    p.x = THREE.MathUtils.clamp(p.x, -BOUND, BOUND); p.z = THREE.MathUtils.clamp(p.z, -BOUND, BOUND);
+    const speed = mv.length() / Math.max(dt, 1e-4);
+    moving.current += ((speed > 0.1 && p.y === 0 ? 1 : 0) - moving.current) * Math.min(1, dt * 10);
+    phase.current += speed * dt * 2.4;
+    if (avatar.current) { avatar.current.position.set(p.x, p.y, p.z); avatar.current.rotation.y = yaw; avatar.current.visible = person === 'third'; }
+    if (person === 'first') {
+      camera.position.set(p.x, p.y + EYE + Math.sin(phase.current * 2) * 0.03 * moving.current, p.z);
+      camera.rotation.set(pitch, yaw, 0);
+    } else {
+      // behind and above the worker; pitch tilts the boom
+      const back = 4.2;
+      want.set(p.x + Math.sin(yaw) * back, p.y + Math.max(0.6, 2.0 - pitch * 2.2), p.z + Math.cos(yaw) * back);
+      camera.position.lerp(want, Math.min(1, dt * 10));
+      camera.lookAt(p.x, p.y + 1.35 + pitch * 1.5, p.z);
+    }
+    cbs.current.onMove(p.x, p.z, yaw);
+    let nk: Kind | null = null;
+    for (const kind of KINDS) if (Math.hypot(p.x - CRATE[kind].x, p.z - CRATE[kind].z) < 3.3) nk = kind;
+    if (nk !== near.current) { near.current = nk; cbs.current.onNear(nk); }
+  });
+  return <group ref={avatar} visible={false}><Worker moving={moving} phase={phase} /></group>;
+}
+
+// Wall screen with the key numbers, standing behind the line. Drawn into a canvas texture so the board is a
+// real 3D surface (hidden behind the gantry, readable from the side) instead of a DOM layer over the scene.
+function drawBoard(c: HTMLCanvasElement, kpi: Props['kpi'], font: string) {
+  const g = c.getContext('2d');
+  if (!g) return;
+  const W = c.width; const H = c.height;
+  g.fillStyle = '#06140f'; g.fillRect(0, 0, W, H);
+  g.textBaseline = 'alphabetic';
+  g.fillStyle = '#7ff7e0'; g.font = `900 44px ${font}`; g.fillText('KPI · LIVE', 36, 70);
+  g.fillStyle = '#9cc8b8'; g.font = `600 26px ${font}`; g.fillText(`${kpi.device ?? '-'} · ${kpi.model ?? '-'}`, 300, 68);
+  g.font = `800 26px ${font}`;
+  const pill = g.measureText(kpi.state).width + 32;
+  g.fillStyle = kpi.playing ? 'rgba(56,201,131,.3)' : 'rgba(232,66,58,.3)';
+  g.beginPath(); g.roundRect(W - 36 - pill, 34, pill, 46, 12); g.fill();
+  g.fillStyle = kpi.playing ? '#9ff5c8' : '#ffb3ab'; g.fillText(kpi.state, W - 20 - pill, 67);
+  const rate = Number(kpi.defectRate);
+  const cells: [string, string, string][] = [
+    ['Total', kpi.total.toLocaleString(), '#ffffff'], ['ดี', kpi.good.toLocaleString(), '#6ff2a8'], ['เสีย', kpi.defect.toLocaleString(), '#ffab6b'],
+    ['Defect rate', `${kpi.defectRate}%`, rate >= 30 ? '#ff8f7a' : rate >= 15 ? '#ffd27a' : '#ffffff'], ['ผล / นาที', String(kpi.epm), '#ffffff'], ['ช่วงเวลา', kpi.windowLabel, '#ffffff'],
+  ];
+  const cw = (W - 72 - 2 * 20) / 3; const ch = 170;
+  cells.forEach(([label, value, color], i) => {
+    const x = 36 + (i % 3) * (cw + 20); const y = 110 + Math.floor(i / 3) * (ch + 20);
+    g.fillStyle = 'rgba(127,247,224,.08)'; g.strokeStyle = 'rgba(127,247,224,.25)'; g.lineWidth = 2;
+    g.beginPath(); g.roundRect(x, y, cw, ch, 16); g.fill(); g.stroke();
+    g.fillStyle = '#9cc8b8'; g.font = `700 26px ${font}`; g.fillText(label, x + 22, y + 44);
+    g.fillStyle = color; g.font = `900 ${value.length > 7 ? 54 : 76}px ${font}`; g.fillText(value, x + 22, y + 135);
+  });
+}
+function KpiBoard({ kpi }: { kpi: Props['kpi'] }) {
+  const g = geo();
+  const { canvas, tex } = useMemo(() => {
+    const c = document.createElement('canvas'); c.width = 1024; c.height = 520;
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+    return { canvas: c, tex: t };
+  }, []);
+  useEffect(() => () => tex.dispose(), [tex]);
+  const key = JSON.stringify(kpi);
+  useEffect(() => {
+    const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
+    const draw = () => { drawBoard(canvas, kpi, font); tex.needsUpdate = true; };
+    draw();
+    let alive = true;
+    void document.fonts?.ready.then(() => { if (alive) draw(); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, canvas, tex]);
+  const sh = (BOARD.w - 0.2) * (520 / 1024);
+  return <group position={[BOARD.x, 0, BOARD.z]}>
+    {[-1, 1].map((s) => <mesh key={s} geometry={g.box} position={[s * (BOARD.w / 2 - 0.15), 1.25, -0.05]} scale={[0.14, 2.5, 0.14]} material={std('#3b4246', { metalness: 0.3, roughness: 0.5 })} castShadow />)}
+    <mesh geometry={g.box} position={[0, 2.5, -0.06]} scale={[BOARD.w, sh + 0.25, 0.12]} material={std('#1d2427', { roughness: 0.6 })} castShadow />
+    <mesh position={[0, 2.5, 0.005]}><planeGeometry args={[BOARD.w - 0.2, sh]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
+  </group>;
+}
+
+// Top-down map of the line; the player marker is moved directly (no re-render per frame).
+function MiniMap({ markerRef }: { markerRef: React.MutableRefObject<SVGGElement | null> }) {
+  const line = (a: THREE.Vector3, b: THREE.Vector3, cls: string, key: string) => <line key={key} x1={a.x} y1={a.z} x2={b.x} y2={b.z} className={cls} />;
+  return <svg className="lv3d-map" viewBox="-17 -11 34 22" aria-hidden="true">
+    <rect x={-17} y={-11} width={34} height={22} className="bg" />
+    {line(new THREE.Vector3(START.x - 0.6, 0, 0), new THREE.Vector3(FORK.x + 0.4, 0, 0), 'belt', 'm')}
+    {KINDS.map((k) => line(FORK, END[k], `belt ${k}`, k))}
+    {KINDS.map((k) => <rect key={`c${k}`} x={CRATE[k].x - 1} y={CRATE[k].z - 0.75} width={2} height={1.5} className={`crate ${k}`} transform={`rotate(${-crateAngle(k) * 180 / Math.PI} ${CRATE[k].x} ${CRATE[k].z})`} />)}
+    <rect x={CAM.x - 0.3} y={-1.4} width={0.6} height={2.8} className="gantry" />
+    <line x1={BOARD.x - BOARD.w / 2} y1={BOARD.z} x2={BOARD.x + BOARD.w / 2} y2={BOARD.z} className="board" />
+    {TREES.map((t, i) => <circle key={i} cx={t.x} cy={t.z} r={0.9 * t.s} className="tree" />)}
+    <g ref={markerRef}><path d="M0 -1.1 L0.75 0.8 L0 0.35 L-0.75 0.8 Z" className="me" /></g>
+  </svg>;
+}
+
+function CratePanel({ kind, count, crates, recent, onClose }: { kind: Kind; count: number; crates: Props['crates']; recent: Fruit3D[]; onClose: () => void }) {
+  const rows = crates.byFruit.map((f) => ({ fruit: f.fruit_type, n: kind === 'good' ? f.good : f.defect })).filter((r) => r.n > 0).sort((a, b) => b.n - a.n);
+  const sum = rows.reduce((a, r) => a + r.n, 0) || 1;
+  const defects = [...crates.byDefect].sort((a, b) => b.n - a.n);
+  const dmax = Math.max(1, ...defects.map((d) => d.n));
+  return <div className={`lv3d-crate ${kind}`} role="dialog" aria-label={kind === 'good' ? 'ข้อมูลตะกร้าดี' : 'ข้อมูลตะกร้าเสีย'}>
+    <div className="lv3d-pick-head">
+      <b>{kind === 'good' ? 'ตะกร้าดี' : 'ตะกร้าเสีย'}</b><span>ช่วง {crates.windowLabel} · จาก DB</span>
+      <button type="button" title="ปิด (Esc)" onClick={onClose}><X size={13} /></button>
+    </div>
+    <strong className="big">{count.toLocaleString()} <small>ผล</small></strong>
+    <h4>แยกตามผลไม้</h4>
+    {rows.length ? rows.map((r) => <div key={r.fruit} className="row"><span>{FRUIT_TH[r.fruit] ?? r.fruit}</span><i><b style={{ width: `${(r.n / sum) * 100}%` }} /></i><em>{r.n}</em></div>) : <p className="none">ยังไม่มีข้อมูล</p>}
+    {kind === 'defect' && <>
+      <h4>ชนิดที่เสีย</h4>
+      {defects.length ? defects.map((d) => <div key={d.defect_type} className="row"><span>{DEFECT_TH[d.defect_type] ?? d.defect_type}</span><i><b style={{ width: `${(d.n / dmax) * 100}%` }} /></i><em>{d.n}</em></div>) : <p className="none">ยังไม่มีข้อมูล</p>}
+    </>}
+    <h4>ลงล่าสุด (ตั้งแต่เปิดหน้า)</h4>
+    {recent.length ? <ul>{recent.map((t) => <li key={t.id}>
+      <b>{t.count > 1 ? `×${t.count}` : `#${t.track ?? '-'}`}</b><span>{t.fruit ? (FRUIT_TH[t.fruit] ?? t.fruit) : '?'}{t.kind === 'defect' && t.defectType ? ` · ${DEFECT_TH[t.defectType] ?? t.defectType}` : ''}</span>
+      <em>{t.conf == null ? '' : `${Math.round(t.conf <= 1 ? t.conf * 100 : t.conf)}%`}</em><time>{pickTime(t.ts)}</time>
+    </li>)}</ul> : <p className="none">ยังไม่มีผลไม้ลงหลังเปิดหน้า</p>}
+  </div>;
 }
 
 // ---- Camera presets / follow ----------------------------------------------------------------------
@@ -981,22 +1241,10 @@ function useReducedMotion() {
 
 export default function LiveScene3D(props: Props) {
   const reduced = useReducedMotion();
-  const [quality, setQuality] = useState<Quality>('high');
-  const [autoDown, setAutoDown] = useState(false);
-  const qualityRef = useRef(quality); qualityRef.current = quality;
-  useEffect(() => {
-    try { const s = window.localStorage.getItem(QUALITY_KEY); if (s === 'low' || s === 'mid' || s === 'high') setQuality(s); } catch { /* storage blocked */ }
-  }, []);
-  const chooseQuality = (q: Quality) => {
-    setQuality(q); setAutoDown(false);
-    try { window.localStorage.setItem(QUALITY_KEY, q); } catch { /* storage blocked */ }
-  };
-  // FPS too low: step down one level for this visit (the saved choice stays as it is)
-  const decline = () => {
-    const cur = qualityRef.current;
-    if (cur === 'low') return;
-    setQuality(cur === 'high' ? 'mid' : 'low'); setAutoDown(true);
-  };
+  const [quality, setQuality] = useState<Quality>('mid');
+  // FPS too low: drop shadows / bloom for this visit
+  const decline = () => setQuality('low');
+  const autoDown = quality === 'low';
   const q = QUALITY[quality];
 
   const [hour, setHour] = useState(bangkokHour);
@@ -1010,46 +1258,117 @@ export default function LiveScene3D(props: Props) {
   const picked = pick?.token.id ?? null;
   const landedNow = !!pick && !pick.landed && !props.tokens.some((t) => t.id === pick.token.id);
   useEffect(() => { if (landedNow) setPick((p) => (p ? { ...p, landed: true, follow: false } : p)); }, [landedNow]);
+
+  // ---- walk mode state
+  const [walk, setWalk] = useState(false);
+  const [person, setPerson] = useState<Person>('first');
+  const [warp, setWarp] = useState<Warp>({ ...WARPS[0], n: 0 });
+  const [locked, setLocked] = useState(false);
+  const [near, setNear] = useState<Kind | null>(null);
+  const nearRef = useRef(near); nearRef.current = near;
+  const [crateOpen, setCrateOpen] = useState<Kind | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const marker = useRef<SVGGElement | null>(null);
+  const canvasEl = () => rootRef.current?.querySelector('canvas') ?? null;
   useEffect(() => {
-    if (!picked) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setPick(null); } };
+    const on = () => setLocked(!!document.pointerLockElement && document.pointerLockElement === canvasEl());
+    document.addEventListener('pointerlockchange', on);
+    return () => { document.removeEventListener('pointerlockchange', on); if (document.pointerLockElement && document.pointerLockElement === canvasEl()) document.exitPointerLock(); };
+  }, []);
+  const lockMouse = () => {
+    try { const r = canvasEl()?.requestPointerLock() as unknown as Promise<void> | undefined; r?.catch?.(() => undefined); } catch { /* not allowed */ }
+  };
+  const unlockMouse = () => { if (document.pointerLockElement) document.exitPointerLock(); };
+  const enterWalk = () => { setPick(null); setCrateOpen(null); setWalk(true); setWarp((w) => ({ ...WARPS[0], n: w.n + 1 })); };
+  const exitWalk = () => { unlockMouse(); setWalk(false); setNear(null); setCam((c) => ({ key: 'overview', nonce: c.nonce + 1 })); };
+  const interact = () => { const k = nearRef.current; if (!k) return; unlockMouse(); setCrateOpen(k); };
+  const onMove = (x: number, z: number, yaw: number) => marker.current?.setAttribute('transform', `translate(${x.toFixed(2)} ${z.toFixed(2)}) rotate(${(-yaw * 180 / Math.PI).toFixed(1)})`);
+
+  // Fruit that landed since the page opened, newest first (crate panel)
+  const [recent, setRecent] = useState<Record<Kind, Fruit3D[]>>({ good: [], defect: [] });
+  const prevTokens = useRef(new Map<string, Fruit3D>());
+  useEffect(() => {
+    const now = new Map(props.tokens.map((t) => [t.id, t]));
+    const landed: Fruit3D[] = [];
+    prevTokens.current.forEach((t, id) => { if (!now.has(id) && Date.now() - t.spawnedAt >= props.travelMs * 0.9) landed.push(t); });
+    prevTokens.current = now;
+    if (!landed.length) return;
+    setRecent((r) => ({
+      good: [...landed.filter((t) => t.kind === 'good').reverse(), ...r.good].slice(0, 8),
+      defect: [...landed.filter((t) => t.kind === 'defect').reverse(), ...r.defect].slice(0, 8),
+    }));
+  }, [props.tokens, props.travelMs]);
+
+  // Esc: close the crate panel, then release a followed fruit, then leave walk mode (mouse already free)
+  useEffect(() => {
+    if (!crateOpen && !picked && !(walk && !locked)) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      if (crateOpen) setCrateOpen(null);
+      else if (picked) setPick(null);
+      else exitWalk();
+    };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [picked]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crateOpen, picked, walk, locked]);
   const goPreset = (key: PresetKey) => { setPick((p) => (p ? { ...p, follow: false } : p)); setCam((c) => ({ key, nonce: c.nonce + 1 })); };
   const pt = pick?.token;
   const live = pt ? props.tokens.find((t) => t.id === pt.id) : undefined;
   const stage = !pt ? '' : pick?.landed ? `ลงตะกร้า${pt.kind === 'good' ? 'ดี' : 'เสีย'}แล้ว` : live && (Date.now() - live.spawnedAt) / props.travelMs < SCAN[1] ? 'กำลังสแกน' : `กำลังไปตะกร้า${pt.kind === 'good' ? 'ดี' : 'เสีย'}`;
   const DayIcon = env.icon === 'sun' ? Sun : env.icon === 'rise' ? Sunrise : env.icon === 'set' ? Sunset : Moon;
 
-  return <div className="lv3d-root">
+  return <div ref={rootRef} className={`lv3d-root ${walk ? 'walking' : ''}`}
+    onClick={(e) => { if (walk && !locked && !crateOpen && e.target instanceof HTMLCanvasElement) lockMouse(); }}>
     <Canvas className="lv3d-canvas" shadows dpr={[1, q.dpr]} camera={{ position: PRESETS.overview.pos, fov: 36 }} gl={{ antialias: true, powerPreference: 'high-performance' }}
-      onPointerMissed={() => setPick(null)}>
+      onPointerMissed={() => { if (!walk) setPick(null); }}>
       <PerformanceMonitor onDecline={decline} flipflops={3} />
-      <Line {...props} env={env} q={q} reduced={reduced} pickId={picked} onPick={onPick} registry={registry} />
-      <OrbitControls makeDefault target={PRESETS.overview.target} enablePan={false} enableZoom={props.tv} enableDamping minDistance={3} maxDistance={30}
-        minPolarAngle={0.02} maxPolarAngle={1.3} />
-      <CameraRig preset={cam.key ?? 'overview'} nonce={cam.nonce} followId={pick?.follow ? picked : null} registry={registry} reduced={reduced}
-        onUserMove={() => { setCam((c) => (c.key ? { ...c, key: null } : c)); setPick((p) => (p?.follow ? { ...p, follow: false } : p)); }} />
+      <Line {...props} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} registry={registry} />
+      {walk
+        ? <Walker person={person} warp={warp} onMove={onMove} onNear={setNear} onInteract={interact} onTogglePerson={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))} />
+        : <>
+          <OrbitControls makeDefault target={PRESETS.overview.target} enablePan={false} enableZoom={props.tv} enableDamping minDistance={3} maxDistance={30}
+            minPolarAngle={0.02} maxPolarAngle={1.3} />
+          <CameraRig preset={cam.key ?? 'overview'} nonce={cam.nonce} followId={pick?.follow ? picked : null} registry={registry} reduced={reduced}
+            onUserMove={() => { setCam((c) => (c.key ? { ...c, key: null } : c)); setPick((p) => (p?.follow ? { ...p, follow: false } : p)); }} />
+        </>}
       {q.bloom && !reduced && <EffectComposer>
         <Bloom mipmapBlur luminanceThreshold={0.85} luminanceSmoothing={0.2} intensity={(props.tv ? 1.1 : 0.7) * (1 + env.night * 0.4)} />
         <Vignette eskil={false} offset={0.25} darkness={props.tv ? 0.7 : 0.35} />
       </EffectComposer>}
     </Canvas>
 
-    <div className="lv3d-cams" role="group" aria-label="มุมกล้อง">
+    {!walk && <div className="lv3d-cams" role="group" aria-label="มุมกล้อง">
       {(Object.keys(PRESETS) as PresetKey[]).map((key) => <button key={key} type="button" className={cam.key === key ? 'on' : ''} onClick={() => goPreset(key)}>{PRESETS[key].label}</button>)}
-      <span>คลิกผลไม้เพื่อติดตาม</span>
-    </div>
+      <button type="button" className="walk" onClick={enterWalk}>เดินสำรวจ</button>
+      <span>คลิกผลไม้ / ตะกร้าเพื่อดูข้อมูล</span>
+    </div>}
+    {walk && <>
+      <div className="lv3d-cams" role="group" aria-label="วาร์ป">
+        {WARPS.map((w) => <button key={w.key} type="button" onClick={() => setWarp((cur) => ({ ...w, n: cur.n + 1 }))}>{w.label}</button>)}
+        <button type="button" onClick={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))}>{person === 'first' ? 'มุมบุคคลที่ 3' : 'มุมบุคคลที่ 1'}</button>
+        <button type="button" className="exit" onClick={exitWalk}>ออกจากโหมดเดิน</button>
+      </div>
+      <MiniMap markerRef={marker} />
+      {locked && person === 'first' && <div className="lv3d-cross" />}
+      {!locked && !crateOpen && <div className="lv3d-walk-help">
+        <b>โหมดเดินสำรวจ</b>
+        <button type="button" onClick={lockMouse}>คลิกเพื่อเริ่มเดิน</button>
+        <ul>
+          <li><kbd>W A S D</kbd> เดิน · <kbd>Shift</kbd> วิ่ง · <kbd>Space</kbd> กระโดด</li>
+          <li>เมาส์ หันมอง · <kbd>V</kbd> สลับมุมบุคคลที่ 1 / 3</li>
+          <li><kbd>E</kbd> ดูข้อมูลตะกร้าเมื่ออยู่ใกล้ · <kbd>Esc</kbd> ปล่อยเมาส์</li>
+        </ul>
+      </div>}
+      {near && !crateOpen && <div className="lv3d-prompt">กด <kbd>E</kbd> ดูข้อมูล{near === 'good' ? 'ตะกร้าดี' : 'ตะกร้าเสีย'}</div>}
+    </>}
 
     <div className="lv3d-opts">
       <span className="lv3d-clock" title="แสงในฉากเปลี่ยนตามเวลาไทย"><DayIcon size={12} />{env.label} {env.clock}</span>
-      <span className="lv3d-quality" role="group" aria-label="คุณภาพกราฟิก" title={autoDown ? 'ลดคุณภาพอัตโนมัติเพราะ FPS ต่ำ' : 'คุณภาพกราฟิก (จำไว้ในเบราว์เซอร์นี้)'}>
-        กราฟิก
-        {(['low', 'mid', 'high'] as Quality[]).map((k) => <button key={k} type="button" className={quality === k ? 'on' : ''} aria-pressed={quality === k} onClick={() => chooseQuality(k)}>{QUALITY[k].label}</button>)}
-        {autoDown && <em>ลดอัตโนมัติ</em>}
-      </span>
+      {autoDown && <em className="lv3d-auto" title="เครื่องกระตุก ปิดเงาและแสงเรืองชั่วคราว">กราฟิกลดอัตโนมัติ</em>}
     </div>
+    {crateOpen && <CratePanel kind={crateOpen} count={props.bins[crateOpen]} crates={props.crates} recent={recent[crateOpen]} onClose={() => setCrateOpen(null)} />}
 
     {pt && <div className={`lv3d-pick ${pt.kind}`}>
       <div className="lv3d-pick-head">

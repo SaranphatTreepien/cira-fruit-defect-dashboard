@@ -698,7 +698,11 @@ function SimulateView() {
                 alert={sceneAlert ? (sceneAlert.level === 'critical' ? 'critical' : 'warning') : null} tv={tv}
                 seed={{ good: shown.good, defect: shown.defect, fruits: live?.by_fruit.map((f) => f.fruit_type).filter((f) => f !== 'unknown') ?? [] }}
                 bins={{ good: shown.good, defect: shown.defect, lastGood: lastIn.good ?? null, lastDefect: lastIn.defect ?? null, hitGood: hit.good, hitDefect: hit.defect }}
-                stats={{ epm: live?.events_last_minute ?? 0, defectRate, spark }} />}
+                stats={{ epm: live?.events_last_minute ?? 0, defectRate, spark }}
+                crates={{ windowLabel, byFruit: live?.by_fruit ?? [], byDefect: live?.by_defect ?? [] }}
+                kpi={{ total: totals.total, good: totals.good, defect: totals.defect, defectRate, epm: live?.events_last_minute ?? 0, model: latest?.model_version ?? null,
+                  device: live?.device?.device_id ?? null, playing, windowLabel,
+                  state: !live ? 'กำลังโหลด' : playing ? 'กำลังทำงาน' : state === 'paused' ? 'หยุดจากเว็บ' : 'เครื่องหยุด' }} />}
               {view === '2d' && <>
               <svg className="lv-belts" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                 <polyline className={`lv-belt ${playing ? 'run' : winding ? 'wind' : ''}`} points="0,48 46,48 54,43 60,38 70,35.5 80,33 84,30" />
