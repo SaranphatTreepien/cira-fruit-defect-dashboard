@@ -20,9 +20,9 @@ CIRA CORE (จริง) / scripts/mqtt_sim.py ─MQTT cira/fruit/events + cira/
 
 - CIRA CORE เป็น node-based: Start/Stop, เปลี่ยนโมเดล, threshold, ความเร็ว, เปิด/ปิดกล้อง (สวิตช์บน node) **ต้องทำใน CIRA CORE เอง** · ไม่มี API/ROS service ให้สั่งจากภายนอก (ตรวจแล้ว 2026-11-25)
 - เว็บทำได้แค่ **รับค่าและดักสถานะ**: event ผลไม้ + heartbeat สถานะเครื่อง ผ่าน MQTT
-- ข้อยกเว้นเดียว: **หยุด/ทำงานต่อจากเว็บ** (admin, หน้า Live) ผ่าน gate ในกล่อง Python ของ flow — `device_commands` + `/api/core/command` (GET เปิดให้ CORE อ่าน, POST admin) · flow `Demo_Detect_Orange_webcontrol.npj`: ตอนหยุด heartbeat = `paused`, ไม่ส่ง event, กล่อง web gate ค้างวง AutoRun (ประมวลผล ~1 เฟรม/2 วิ) · ไม่ได้กดสวิตช์กล้องใน CORE และ VideoFile ยังเดินตามเวลา (ภาพกระโดดข้ามช่วงที่หยุด)
+- **ไม่มีปุ่มหยุด/ทำงานต่อจากเว็บแล้ว** (เอาออก 2026-11-25: ผู้ใช้สับสน) · สถานะเครื่องบนเว็บแสดงตามที่ CIRA CORE ส่งมาเท่านั้น · `device_commands` + `/api/core/command` ยังอยู่เพราะ flow `Demo_Detect_Orange_webcontrol.npj` อ่าน GET ทุกรอบ (CAM_01 ค่าล่าสุด run=true) · ห้ามเปลี่ยนค่าในตารางนี้
 - เขียนโค้ดอิสระได้เฉพาะในกล่อง `Python` ของ flow (ใช้สร้าง payload) · field ที่ CORE สร้างไม่ได้ให้ adapter ฝั่งเรา (`mqtt_to_db.py`) เติม
-- นอกจาก หยุด/ทำงานต่อ ข้างบน อย่าสร้างหน้า/ปุ่มที่ทำเหมือนควบคุมหรือตั้งค่า CORE ได้
+- อย่าสร้างหน้า/ปุ่มที่ทำเหมือนควบคุมหรือตั้งค่า CORE ได้ (ปุ่ม "จำลองเหตุฉุกเฉิน" ในฉาก 3D เป็นแค่ภาพ ไม่ส่งคำสั่ง)
 
 ## ขอบเขต Dashboard
 

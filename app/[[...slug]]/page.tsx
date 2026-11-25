@@ -6,7 +6,7 @@ import dynamic from 'next/dynamic';
 import {
   Activity, AlertTriangle, BarChart3, Bell, Bot, Boxes, Camera, Check, ChevronRight, CloudOff,
   Download, FileText, Gauge, History, Info, Leaf, LineChart, LogIn, LogOut, MessageCircle, MoreHorizontal,
-  PackageCheck, Pause, Play, Power, Radio, RefreshCcw, Search, Save, Settings2, SlidersHorizontal,
+  PackageCheck, Power, Radio, RefreshCcw, Search, Save, Settings2, SlidersHorizontal,
   Sparkles, Square, Tag, Timer, Trash2, TrendingDown, TrendingUp, UserCircle2, Users, Wifi, WifiOff,
   Zap, CircleDot, Monitor, X, Volume2, VolumeX, PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2, Repeat,
 } from 'lucide-react';
@@ -311,59 +311,6 @@ function useLiveSfx() {
   return { on, toggle, play };
 }
 
-// Run / pause gate for a CIRA CORE device (admin). It does not press CORE's own Start/Stop: the flow's
-// Python box polls /api/core/command and, while paused, sends no fruit events and reports state "paused".
-// One hook per page: the header button and the console in the 3D scene share it.
-function useCoreCommand(deviceId: string | null, state: string | null) {
-  const { user } = useAuth();
-  const [cmd, setCmd] = useState<{ run: boolean; updated_by: string | null; updated_at: string | null } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-  useEffect(() => {
-    if (!deviceId) return;
-    let active = true;
-    const load = async () => {
-      try {
-        const r = await fetch(`/api/core/command?device_id=${encodeURIComponent(deviceId)}`, { cache: 'no-store' });
-        const j = await r.json() as { run: boolean; updated_by: string | null; updated_at: string | null };
-        if (active && r.ok) setCmd(j);
-      } catch { /* shown as unknown */ }
-    };
-    void load();
-    const id = window.setInterval(() => { if (!document.hidden) void load(); }, 5000);
-    return () => { active = false; window.clearInterval(id); };
-  }, [deviceId]);
-  const send = async (run: boolean) => {
-    if (!deviceId) return;
-    const question = run ? `สั่งให้ ${deviceId} ทำงานต่อ?` : `หยุด ${deviceId} จากเว็บ?
-flow ใน CIRA CORE จะหยุดส่งผลไม้ (กล้อง/AI ใน CORE ยังเปิดอยู่)`;
-    if (!window.confirm(question)) return;
-    setBusy(true); setErr('');
-    try {
-      const r = await fetch('/api/core/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id: deviceId, run }) });
-      const j = await r.json() as { error?: string };
-      if (!r.ok) throw new Error(j.error || 'สั่งไม่สำเร็จ');
-      setCmd({ run, updated_by: user?.name ?? null, updated_at: new Date().toISOString() });
-    } catch (e) { setErr(e instanceof Error ? e.message : 'สั่งไม่สำเร็จ'); } finally { setBusy(false); }
-  };
-  const paused = cmd ? !cmd.run : false;
-  const waiting = !!cmd && (paused ? state !== 'paused' : state === 'paused');
-  const title = cmd?.updated_at ? `สั่งล่าสุด${cmd.updated_by ? ` โดย ${cmd.updated_by}` : ''} ${liveTime(cmd.updated_at)}` : 'ยังไม่เคยสั่งจากเว็บ';
-  return { deviceId, known: !!cmd, paused, waiting, busy, err, title, isAdmin: user?.role === 'admin', send };
-}
-type CoreControl = ReturnType<typeof useCoreCommand>;
-
-function CoreCommand({ c }: { c: CoreControl }) {
-  if (!c.isAdmin) return c.paused ? <span className="core-cmd-note" title={c.title}>หยุดจากเว็บ</span> : null;
-  return <div className="core-cmd" title={c.title}>
-    <button type="button" className={`btn btn-sm ${c.paused ? 'btn-primary' : 'btn-danger'}`} disabled={c.busy || !c.known} onClick={() => void c.send(c.paused)}>
-      {c.paused ? <><Play size={13} /> สั่งทำงานต่อ</> : <><Pause size={13} /> สั่งหยุดจากเว็บ</>}
-    </button>
-    {c.waiting && <em>รอ CORE รับคำสั่ง...</em>}
-    {c.err && <em className="err">{c.err}</em>}
-  </div>;
-}
-
 function SimulateView() {
   const [windowMin, setWindowMin] = useState(15);
   const [live, setLive] = useState<LiveData | null>(null);
@@ -435,7 +382,6 @@ function SimulateView() {
 
   const state = live?.device?.state ?? (live ? 'offline' : null);
   const playing = state === 'playing' || state === 'started';
-  const core = useCoreCommand(live?.device?.device_id ?? null, state);
 
   // Queue new events for replay: each fruit starts at its CORE timestamp + one playback offset. The offset
   // is the age of the oldest new fruit (so none is already late) and only shrinks slowly, so the flow stays even.
@@ -648,8 +594,7 @@ function SimulateView() {
     <div className="card live-head">
       <div className="live-head-title"><h1>Live</h1><span>ข้อมูลจริงจาก DB · อัปเดตทุก 2 วินาที</span></div>
       <div className="live-head-machine">
-        <StatusPill tone={!live ? 'neutral' : playing ? 'good' : state === 'paused' ? 'warn' : 'bad'}>{!live ? 'กำลังโหลด...' : playing ? (state === 'started' ? 'เริ่มทำงาน' : 'กำลังทำงาน') : state === 'paused' ? 'หยุดจากเว็บ' : 'เครื่องหยุด'}</StatusPill>
-        {live?.device?.device_id && <CoreCommand c={core} />}
+        <StatusPill tone={!live ? 'neutral' : playing ? 'good' : state === 'paused' ? 'warn' : 'bad'}>{!live ? 'กำลังโหลด...' : playing ? (state === 'started' ? 'เริ่มทำงาน' : 'กำลังทำงาน') : state === 'paused' ? 'หยุดชั่วคราว' : 'เครื่องหยุด'}</StatusPill>
         <div><strong>{live?.device?.device_id ?? 'ไม่พบอุปกรณ์'}</strong><span>{live?.device?.source_type ?? '-'} · heartbeat {live?.device?.age_sec == null ? '-' : `${live.device.age_sec} วิ`}</span></div>
         <div><strong>{live?.last_event_at ? liveTime(live.last_event_at) : '-'}</strong><span>event ล่าสุด{lastEventAgo != null ? ` · ${lastEventAgo} วิที่แล้ว` : ''}</span></div>
       </div>
@@ -711,11 +656,10 @@ function SimulateView() {
                 crates={{ windowLabel, byFruit: live?.by_fruit ?? [], byDefect: live?.by_defect ?? [] }}
                 kpi={{ total: totals.total, good: totals.good, defect: totals.defect, defectRate, epm: live?.events_last_minute ?? 0, model: latest?.model_version ?? null,
                   device: live?.device?.device_id ?? null, playing, windowLabel,
-                  state: !live ? 'กำลังโหลด' : playing ? 'กำลังทำงาน' : state === 'paused' ? 'หยุดจากเว็บ' : 'เครื่องหยุด' }}
+                  state: !live ? 'กำลังโหลด' : playing ? 'กำลังทำงาน' : state === 'paused' ? 'หยุดชั่วคราว' : 'เครื่องหยุด' }}
                 system={{ db: health.db, mqtt: health.mqtt, internet: health.internet, heartbeatAge: live?.device?.age_sec ?? null, ingestAvg: ingest?.avg_s ?? null,
                   ingestMax: ingest?.max_s ?? null, dbToScreen: arrival?.dbToScreen ?? null, lastEventAgo }}
-                control={{ device: core.deviceId, known: core.known, paused: core.paused, waiting: core.waiting, busy: core.busy, err: core.err, isAdmin: core.isAdmin,
-                  machine: !live ? 'loading' : playing ? 'running' : state === 'paused' ? 'paused' : 'stopped', send: (run: boolean) => { void core.send(run); } }} />}
+                control={{ device: live?.device?.device_id ?? null, machine: !live ? 'loading' : playing ? 'running' : state === 'paused' ? 'paused' : 'stopped' }} />}
               {view === '2d' && <>
               <svg className="lv-belts" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                 <polyline className={`lv-belt ${playing ? 'run' : winding ? 'wind' : ''}`} points="0,48 46,48 54,43 60,38 70,35.5 80,33 84,30" />

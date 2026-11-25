@@ -35,9 +35,8 @@ type Props = {
   crates: { windowLabel: string; byFruit: { fruit_type: string; good: number; defect: number; total: number }[]; byDefect: { defect_type: string; n: number }[] };
   kpi: { total: number; good: number; defect: number; defectRate: string; epm: number; model: string | null; device: string | null; state: string; playing: boolean; windowLabel: string };
   system: { db: string; mqtt: string; internet: string; heartbeatAge: number | null; ingestAvg: number | null; ingestMax: number | null; dbToScreen: number | null; lastEventAgo: number | null };
-  // web pause / resume gate (the only control the dashboard has; admin only, confirmed in SimulateView)
-  control: { device: string | null; known: boolean; paused: boolean; waiting: boolean; busy: boolean; err: string; isAdmin: boolean;
-    machine: 'loading' | 'running' | 'paused' | 'stopped'; send: (run: boolean) => void };
+  // machine state as CIRA CORE reports it (read only: the dashboard does not start or stop the machine)
+  control: { device: string | null; machine: 'loading' | 'running' | 'paused' | 'stopped' };
 };
 
 // ---- Graphics quality ---------------------------------------------------------------------------
@@ -785,9 +784,9 @@ function CrateLabel({ kind, count, last, hit, fill, swapping }: { kind: Kind; co
 }
 
 // ---- Scene --------------------------------------------------------------------------------------
-type LineProps = Props & { fun: Fun; boardData: BoardData | null; onConsole: () => void; env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
+type LineProps = Props & { fun: Fun; boardData: BoardData | null; env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
 
-function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, crates, system, control, fun, boardData, onConsole, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
+function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, crates, system, control, fun, boardData, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
   const speed = useRef(0);
   const power = useRef(0);
   const emDef = fun.emerg ? EMERG[fun.emerg] : null;
@@ -980,7 +979,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     <ParetoBoard crates={crates} />
     <AlertBoard data={boardData} />
     <SystemBoard system={system} />
-    <ControlConsole control={control} onPress={onConsole} />
+    <ControlConsole control={control} />
 
     {tokens.map((t) => <MovingFruit key={t.id} token={t} travelMs={travelMs} pileTarget={targets.current.get(t.id) ?? CRATE[t.kind]}
       selected={pickId === t.id} onPick={onPick} registry={registry} q={q} reduced={reduced} />)}
@@ -2118,7 +2117,7 @@ const WARPS: { key: string; label: string; x: number; z: number; yaw: number; pi
   { key: 'view', label: 'จุดชมวิว', x: VIEW.x, z: VIEW.z - 0.9, yaw: 0.05, pitch: 0.02 },
   ...WALL_KEYS.map((key) => { const b = BOARDS[key]; return { key, label: b.label, x: b.x + Math.sin(b.rot) * 4.5, z: b.z + Math.cos(b.rot) * 4.5, yaw: b.rot, pitch: 0.24 }; }),
 ];
-type Aim = { pileId?: string; tokenId?: string; console?: boolean; pet?: 'cat' | 'dog'; team?: number; emerg?: Emerg };
+type Aim = { pileId?: string; tokenId?: string; pet?: 'cat' | 'dog'; team?: number; emerg?: Emerg };
 type Fun = {
   meowKey: number; barkKey: number; onPet: (p: 'cat' | 'dog') => void; marks: { cat: React.MutableRefObject<SVGCircleElement | null>; dog: React.MutableRefObject<SVGCircleElement | null> };
   talk: number | null; onTeam: (i: number) => void; emerg: Emerg | null; onEmerg: (e: Emerg) => void;
@@ -2207,9 +2206,9 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
       ray.setFromCamera(centre, camera);
       for (const hit of ray.intersectObjects(scene.children, true)) {
         let o: THREE.Object3D | null = hit.object;
-        const keyOf = (u: Record<string, unknown>) => u.pileId || u.tokenId || u.console || u.pet || u.emerg || u.team !== undefined;
+        const keyOf = (u: Record<string, unknown>) => u.pileId || u.tokenId || u.pet || u.emerg || u.team !== undefined;
         while (o && !keyOf(o.userData)) o = o.parent;
-        if (o) { const u = o.userData; cbs.current.onAim({ pileId: u.pileId, tokenId: u.tokenId, console: u.console, pet: u.pet, team: u.team, emerg: u.emerg }); return; }
+        if (o) { const u = o.userData; cbs.current.onAim({ pileId: u.pileId, tokenId: u.tokenId, pet: u.pet, team: u.team, emerg: u.emerg }); return; }
       }
     };
     document.addEventListener('mousedown', shoot);
@@ -2483,25 +2482,18 @@ function SystemBoard({ system }: { system: Props['system'] }) {
   return <CanvasBoard b={BOARDS.system} draw={draw} version={JSON.stringify(system)} />;
 }
 
-// Operator console: shows the machine state and the web pause / resume button (admin only, confirmed).
+// Operator console: shows the machine state exactly as CIRA CORE reports it (read only, no buttons).
+// Start / stop happen in CIRA CORE itself.
 const MACHINE: Record<Props['control']['machine'], [string, string]> = {
-  running: ['กำลังทำงาน', '#38f59a'], paused: ['หยุดจากเว็บ', '#ffd21f'], stopped: ['เครื่องหยุด', '#ff4a3d'], loading: ['กำลังโหลด', '#9aa7a0'],
+  running: ['กำลังทำงาน', '#38f59a'], paused: ['หยุดชั่วคราว', '#ffd21f'], stopped: ['เครื่องหยุด', '#ff4a3d'], loading: ['กำลังโหลด', '#9aa7a0'],
 };
-function ControlConsole({ control, onPress }: { control: Props['control']; onPress: () => void }) {
+function ControlConsole({ control }: { control: Props['control'] }) {
   const g3 = geo();
-  const gl = useThree((st) => st.gl);
   const [label, color] = MACHINE[control.machine];
   const lamp = useMemo(() => new THREE.MeshBasicMaterial({ color, toneMapped: false }), [color]);
-  const btn = useMemo(() => new THREE.MeshStandardMaterial({ color: '#888', emissive: new THREE.Color('#000'), roughness: 0.35 }), []);
-  useEffect(() => () => { lamp.dispose(); btn.dispose(); }, [lamp, btn]);
-  const canPress = control.isAdmin && control.known && !control.busy;
-  const btnColor = !control.isAdmin || !control.known ? '#7a8580' : control.paused ? '#2fc46f' : '#e5453a';
-  useFrame(({ clock }) => {
-    btn.color.set(btnColor); btn.emissive.set(btnColor);
-    btn.emissiveIntensity = canPress ? 0.35 + 0.25 * Math.sin(clock.elapsedTime * 4) : 0.05;
-  });
+  useEffect(() => () => lamp.dispose(), [lamp]);
   const { canvas, tex } = useMemo(() => {
-    const c = document.createElement('canvas'); c.width = 768; c.height = 300;
+    const c = document.createElement('canvas'); c.width = 900; c.height = 300;
     const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
     return { canvas: c, tex: t };
   }, []);
@@ -2510,31 +2502,21 @@ function ControlConsole({ control, onPress }: { control: Props['control']; onPre
     const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
     const paint = () => {
       const g = canvas.getContext('2d'); if (!g) return;
-      g.fillStyle = '#071a14'; g.fillRect(0, 0, 768, 300);
-      g.fillStyle = '#7ff7e0'; g.font = `900 34px ${font}`; g.fillText('CONTROL · ' + (control.device ?? '-'), 28, 52);
-      g.fillStyle = color; g.font = `900 56px ${font}`; g.fillText(label, 28, 130);
-      g.fillStyle = '#b9d3c9'; g.font = `700 26px ${font}`;
-      const hint = !control.isAdmin ? 'ปุ่มนี้ใช้ได้เฉพาะ admin' : !control.known ? 'กำลังอ่านคำสั่งล่าสุด...' : control.busy ? 'กำลังส่งคำสั่ง...'
-        : control.waiting ? 'รอ CORE รับคำสั่ง...' : control.paused ? 'กดปุ่มเขียว = สั่งทำงานต่อ' : 'กดปุ่มแดง = สั่งหยุดจากเว็บ';
-      g.fillText(hint, 28, 190);
-      g.fillStyle = '#7f9c93'; g.font = `600 20px ${font}`; g.fillText('หยุดแค่การส่งผลจาก flow · กล้อง/AI ใน CORE ยังเปิดอยู่', 28, 240);
-      if (control.err) { g.fillStyle = '#ff8f7a'; g.font = `700 22px ${font}`; g.fillText(control.err, 28, 280); }
+      g.fillStyle = '#071a14'; g.fillRect(0, 0, 900, 300);
+      g.fillStyle = '#7ff7e0'; g.font = `900 34px ${font}`; g.fillText('สถานะเครื่อง · ' + (control.device ?? '-'), 32, 56);
+      g.fillStyle = color; g.font = `900 72px ${font}`; g.fillText(label, 32, 150);
+      g.fillStyle = '#b9d3c9'; g.font = `700 26px ${font}`; g.fillText('แสดงตามสถานะที่ CIRA CORE ส่งมา', 32, 208);
+      g.fillStyle = '#7f9c93'; g.font = `600 22px ${font}`; g.fillText('เปิด / หยุดเครื่องทำที่ CIRA CORE', 32, 254);
       tex.needsUpdate = true;
     };
     paint();
     void document.fonts?.ready.then(paint);
-  }, [canvas, tex, control.device, control.isAdmin, control.known, control.busy, control.waiting, control.paused, control.err, label, color]);
-  const press = (e: ThreeEvent<MouseEvent>) => { e.stopPropagation(); onPress(); };
+  }, [canvas, tex, control.device, label, color]);
   return <group position={[CONSOLE.x, 0, CONSOLE.z]}>
     <mesh geometry={g3.box} position={[0, 0.5, 0]} scale={[2.6, 1.0, 0.9]} material={std('#2b3236', { roughness: 0.5 })} castShadow receiveShadow />
     <group position={[0, 1.08, 0.05]} rotation={[0.55, 0, 0]}>
       <mesh geometry={g3.box} scale={[2.6, 0.06, 1.0]} material={std('#1d2427', { roughness: 0.4 })} castShadow />
-      <mesh position={[-0.35, 0.035, 0]} rotation={[-Math.PI / 2, 0, 0]}><planeGeometry args={[1.7, 0.66]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
-      <group position={[0.85, 0.06, 0]} userData={{ console: true }} onClick={press}
-        onPointerOver={(e) => { e.stopPropagation(); gl.domElement.style.cursor = canPress ? 'pointer' : 'not-allowed'; }} onPointerOut={() => { gl.domElement.style.cursor = ''; }}>
-        <mesh position={[0, 0.02, 0]}><cylinderGeometry args={[0.26, 0.3, 0.06, 24]} /><meshStandardMaterial color="#ffd21f" /></mesh>
-        <mesh position={[0, 0.1, 0]} material={btn}><cylinderGeometry args={[0.2, 0.22, 0.12, 24]} /></mesh>
-      </group>
+      <mesh position={[0, 0.035, 0]} rotation={[-Math.PI / 2, 0, 0]}><planeGeometry args={[2.4, 0.8]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
     </group>
     <mesh position={[1.15, 1.3, -0.35]}><cylinderGeometry args={[0.04, 0.04, 1.0, 8]} /><meshStandardMaterial color="#cfd8d3" /></mesh>
     <mesh position={[1.15, 1.86, -0.35]} material={lamp}><sphereGeometry args={[0.13, 14, 10]} /></mesh>
@@ -2765,17 +2747,9 @@ export default function LiveScene3D(props: Props) {
   }, [walk]);
   const enterWalk = () => { setPick(null); setCrateOpen(null); setWalk(true); setWarp((w) => ({ ...WARPS[0], n: w.n + 1 })); };
   const exitWalk = () => { unlockMouse(); setWalk(false); setNear(null); setCam((c) => ({ key: 'overview', nonce: c.nonce + 1 })); };
-  // console button: same pause / resume as the header (admin + confirm dialog in SimulateView)
-  const pressConsole = () => {
-    const c = props.control;
-    if (!c.isAdmin) { setToast('ปุ่มหยุด/ทำงานต่อใช้ได้เฉพาะ admin'); return; }
-    if (!c.known || c.busy) return;
-    unlockMouse();
-    c.send(c.paused);
-  };
   const interact = () => {
     const k = nearRef.current; if (!k) return;
-    if (k === 'console') { pressConsole(); return; }
+    if (k === 'console') return;
     if (k === 'test') { unlockMouse(); setTestMenu(true); return; }
     if (k.startsWith('team')) { onTeam(Number(k.slice(4))); return; }
     unlockMouse(); setCrateOpen(k as Kind);
@@ -2783,7 +2757,6 @@ export default function LiveScene3D(props: Props) {
   const pileIndex = useRef(new Map<string, Piled>());
   const onPile = (p: Piled) => setPick({ token: p.token ?? { id: p.id, kind: p.kind, fruit: p.fruit, count: 1, conf: null, defectType: p.defectType, track: null, spawnedAt: 0, seed: true }, landed: true, follow: false });
   const onAim = (hit: Aim) => {
-    if (hit.console) { pressConsole(); return; }
     if (hit.pet) { onPet(hit.pet); return; }
     if (hit.team !== undefined) { onTeam(hit.team); return; }
     if (hit.emerg) { onEmerg(hit.emerg); return; }
@@ -2836,7 +2809,7 @@ export default function LiveScene3D(props: Props) {
     <Canvas className="lv3d-canvas" shadows dpr={[1, q.dpr]} camera={{ position: PRESETS.overview.pos, fov: 36 }} gl={{ antialias: true, powerPreference: 'high-performance' }}
       onPointerMissed={() => { if (!walk) setPick(null); }}>
       <PerformanceMonitor onDecline={decline} flipflops={3} />
-      <Line {...props} fun={{ meowKey, barkKey, onPet, marks: { cat: catMarker, dog: dogMarker }, talk: teamOpen, onTeam, emerg: emerg?.kind ?? null, onEmerg: (k) => { unlockMouse(); onEmerg(k); } }} boardData={boardData} onConsole={pressConsole} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
+      <Line {...props} fun={{ meowKey, barkKey, onPet, marks: { cat: catMarker, dog: dogMarker }, talk: teamOpen, onTeam, emerg: emerg?.kind ?? null, onEmerg: (k) => { unlockMouse(); onEmerg(k); } }} boardData={boardData} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
       {walk
         ? <Walker person={person} warp={warp} onMove={onMove} onNear={setNear} onInteract={interact} onTogglePerson={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))} onAim={onAim} />
         : <>
@@ -2882,7 +2855,7 @@ export default function LiveScene3D(props: Props) {
         </ul>
       </div>}
       {near && !crateOpen && teamOpen == null && !testMenu && <div className="lv3d-prompt">{near === 'console'
-        ? (props.control.isAdmin ? <>กด <kbd>E</kbd> {props.control.paused ? 'สั่งทำงานต่อ' : 'สั่งหยุดจากเว็บ'} (มีหน้ายืนยัน)</> : 'ห้องควบคุม · ปุ่มใช้ได้เฉพาะ admin')
+        ? <>ห้องควบคุม · สถานะตาม CIRA CORE: {MACHINE[props.control.machine][0]}</>
         : near === 'test' ? <>กด <kbd>E</kbd> เปิดเมนูจำลองเหตุฉุกเฉิน</>
         : near.startsWith('team') ? <>กด <kbd>E</kbd> คุยกับ {TEAM[Number(near.slice(4))].nick}</>
         : <>กด <kbd>E</kbd> ดูข้อมูล{near === 'good' ? 'ตะกร้าดี' : 'ตะกร้าเสีย'}</>}</div>}

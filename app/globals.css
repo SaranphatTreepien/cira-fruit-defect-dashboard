@@ -772,9 +772,6 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 @media (prefers-reduced-motion: reduce) { .lv3d-bin strong.pop, .lv3d-pick, .lv3d-tag { animation: none !important; } }
 
 /* Run / pause gate for a CIRA CORE device (Live header, admin) */
-.core-cmd { display: flex; align-items: center; gap: 8px; }
-.core-cmd em, .core-cmd-note { font-style: normal; font-size: 11px; color: #9a5b12; }
-.core-cmd em.err { color: #c0392b; }
 .live-stage.stopped .lv-scene.lv3d:has(.lv3d-root.walking) { filter: none; }
 .lv-scene.lv3d > .lv-stopped, .lv-scene.lv3d > .lv-power-off { display: none; }
 .live-stage.stopped .lv-scene.lv3d { filter: none; }
