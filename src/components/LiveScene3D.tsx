@@ -377,7 +377,11 @@ function stripeTexture() {
   return t;
 }
 
-function Belt({ from, to, width, strip, speed }: { from: THREE.Vector3; to: THREE.Vector3; width: number; strip: THREE.Material; speed: React.MutableRefObject<number> }) {
+// trim: cut a side rail short at the start (s = side, start) or end, so rails do not cross the other belts at the fork
+function Belt({ from, to, width, strip, speed, trim = [], lift = 0 }: {
+  from: THREE.Vector3; to: THREE.Vector3; width: number; strip: THREE.Material; speed: React.MutableRefObject<number>;
+  trim?: { side: number; start?: number; end?: number }[]; lift?: number;
+}) {
   const d = to.clone().sub(from).setY(0);
   const len = d.length();
   const mid = from.clone().add(to).multiplyScalar(0.5);
@@ -391,19 +395,23 @@ function Belt({ from, to, width, strip, speed }: { from: THREE.Vector3; to: THRE
       <boxGeometry args={[len, 0.24, width + 0.3]} />
       <meshStandardMaterial color="#eef3f0" roughness={0.4} />
     </mesh>
-    <mesh position={[0, BELT_Y + 0.005, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+    <mesh position={[0, BELT_Y + 0.005 + lift, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
       <planeGeometry args={[len, width]} />
       <meshStandardMaterial map={tex} roughness={0.85} />
     </mesh>
-    {[-1, 1].map((s) => <group key={s}>
-      <mesh position={[0, BELT_Y + 0.08, s * (width / 2 + 0.1)]} castShadow>
-        <boxGeometry args={[len, 0.16, 0.12]} />
-        <meshStandardMaterial color="#f7faf8" roughness={0.3} />
-      </mesh>
-      <mesh position={[0, BELT_Y + 0.02, s * (width / 2 + 0.165)]} material={strip}>
-        <boxGeometry args={[len * 0.96, 0.04, 0.012]} />
-      </mesh>
-    </group>)}
+    {[-1, 1].map((s) => {
+      const t = trim.find((x) => x.side === s); const a = t?.start ?? 0; const b = t?.end ?? 0;
+      const rl = Math.max(0.1, len - a - b); const rx = (a - b) / 2;
+      return <group key={s}>
+        <mesh position={[rx, BELT_Y + 0.08, s * (width / 2 + 0.1)]} castShadow>
+          <boxGeometry args={[rl, 0.16, 0.12]} />
+          <meshStandardMaterial color="#f7faf8" roughness={0.3} />
+        </mesh>
+        <mesh position={[rx, BELT_Y + 0.02, s * (width / 2 + 0.165)]} material={strip}>
+          <boxGeometry args={[rl * 0.96, 0.04, 0.012]} />
+        </mesh>
+      </group>;
+    })}
     {legs.map((i) => {
       const x = -len / 2 + 0.6 + (i * (len - 1.2)) / Math.max(1, legs.length - 1);
       return [-1, 1].map((s) => <mesh key={`${i}${s}`} position={[x, (BELT_Y - 0.24) / 2, s * (width / 2 + 0.05)]} castShadow>
@@ -896,9 +904,9 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     <Grid position={[0, 0.002, 0]} args={[60, 60]} cellSize={1} cellThickness={0.5} sectionSize={5} sectionThickness={1}
       cellColor={env.cell} sectionColor={env.section} fadeDistance={34} fadeStrength={1.4} infiniteGrid />
 
-    <Belt from={new THREE.Vector3(START.x - 0.6, 0, 0)} to={new THREE.Vector3(FORK.x + 0.4, 0, 0)} width={1.4} strip={mats.green} speed={speed} />
-    <Belt from={new THREE.Vector3(FORK.x, 0, -0.1)} to={END.good.clone().add(dirOf('good').multiplyScalar(0.35))} width={1.3} strip={mats.green} speed={speed} />
-    <Belt from={new THREE.Vector3(FORK.x, 0, 0.1)} to={END.defect.clone().add(dirOf('defect').multiplyScalar(0.35))} width={1.3} strip={mats.orange} speed={speed} />
+    <Belt from={new THREE.Vector3(START.x - 0.6, 0, 0)} to={new THREE.Vector3(FORK.x + 0.4, 0, 0)} width={1.4} strip={mats.green} speed={speed} trim={[{ side: -1, end: 0.55 }, { side: 1, end: 0.55 }]} />
+    <Belt from={new THREE.Vector3(FORK.x, 0, -0.1)} to={END.good.clone().add(dirOf('good').multiplyScalar(0.35))} width={1.3} strip={mats.green} speed={speed} trim={[{ side: 1, start: 2.1 }]} />
+    <Belt from={new THREE.Vector3(FORK.x, 0, 0.1)} to={END.defect.clone().add(dirOf('defect').multiplyScalar(0.35))} width={1.3} strip={mats.orange} speed={speed} trim={[{ side: -1, start: 2.1 }]} lift={0.004} />
     <Gantry beam={mats.teal} cone={mats.cone} head={mats.head} scan={scan} reduced={reduced} />
     <Diverter paddleKey={paddleKey} mat={mats.paddle} />
     {KINDS.map((kind) => <StationCrate key={kind} kind={kind} rim={kind === 'good' ? mats.green : mats.orange} swap={swap[kind]} glow={1 + env.night * 1.5} onClick={onCrate} />)}
@@ -1279,6 +1287,28 @@ export default function LiveScene3D(props: Props) {
     try { const r = canvasEl()?.requestPointerLock() as unknown as Promise<void> | undefined; r?.catch?.(() => undefined); } catch { /* not allowed */ }
   };
   const unlockMouse = () => { if (document.pointerLockElement) document.exitPointerLock(); };
+  // Hold Alt in walk mode: free the mouse cursor (e.g. to click a crate), lock again on release
+  const [altHeld, setAltHeld] = useState(false);
+  const lockedRef = useRef(locked); lockedRef.current = locked;
+  useEffect(() => {
+    if (!walk) return;
+    let relock = false;
+    const down = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt') return;
+      e.preventDefault();
+      if (e.repeat) return;
+      relock = lockedRef.current; setAltHeld(true); unlockMouse();
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt') return;
+      e.preventDefault(); setAltHeld(false);
+      if (relock) lockMouse();
+      relock = false;
+    };
+    window.addEventListener('keydown', down); window.addEventListener('keyup', up);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walk]);
   const enterWalk = () => { setPick(null); setCrateOpen(null); setWalk(true); setWarp((w) => ({ ...WARPS[0], n: w.n + 1 })); };
   const exitWalk = () => { unlockMouse(); setWalk(false); setNear(null); setCam((c) => ({ key: 'overview', nonce: c.nonce + 1 })); };
   const interact = () => { const k = nearRef.current; if (!k) return; unlockMouse(); setCrateOpen(k); };
@@ -1352,13 +1382,13 @@ export default function LiveScene3D(props: Props) {
       </div>
       <MiniMap markerRef={marker} />
       {locked && person === 'first' && <div className="lv3d-cross" />}
-      {!locked && !crateOpen && <div className="lv3d-walk-help">
+      {!locked && !crateOpen && !altHeld && <div className="lv3d-walk-help">
         <b>โหมดเดินสำรวจ</b>
         <button type="button" onClick={lockMouse}>คลิกเพื่อเริ่มเดิน</button>
         <ul>
           <li><kbd>W A S D</kbd> เดิน · <kbd>Shift</kbd> วิ่ง · <kbd>Space</kbd> กระโดด</li>
           <li>เมาส์ หันมอง · <kbd>V</kbd> สลับมุมบุคคลที่ 1 / 3</li>
-          <li><kbd>E</kbd> ดูข้อมูลตะกร้าเมื่ออยู่ใกล้ · <kbd>Esc</kbd> ปล่อยเมาส์</li>
+          <li><kbd>E</kbd> ดูข้อมูลตะกร้าเมื่ออยู่ใกล้ · กด <kbd>Alt</kbd> ค้างไว้ให้เมาส์โผล่ · <kbd>Esc</kbd> ปล่อยเมาส์</li>
         </ul>
       </div>}
       {near && !crateOpen && <div className="lv3d-prompt">กด <kbd>E</kbd> ดูข้อมูล{near === 'good' ? 'ตะกร้าดี' : 'ตะกร้าเสีย'}</div>}
