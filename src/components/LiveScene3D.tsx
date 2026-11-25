@@ -15,6 +15,7 @@ export type Fruit3D = {
   id: string; kind: Kind; fruit: string | null; count: number; conf: number | null;
   defectType: string | null; track: number | null; spawnedAt: number;
   model?: string | null; ts?: string | null;
+  seed?: boolean; // filler fruit drawn from the window totals (no event behind it)
 };
 
 type Props = {
@@ -313,7 +314,7 @@ function MovingFruit({ token, travelMs, pileTarget, selected, onPick, registry, 
   const verdict = token.kind === 'defect' ? (token.defectType ? (DEFECT_TH[token.defectType] ?? token.defectType) : 'เสีย') : 'ดี';
   const defectType = token.kind === 'defect' && token.count === 1 ? (token.defectType ?? 'rot') : null;
   const click = (e: ThreeEvent<MouseEvent>) => { e.stopPropagation(); onPick(token); };
-  return <group ref={ref}>
+  return <group ref={ref} userData={{ tokenId: token.id }}>
     <group ref={roll}>
       <FruitBody fruit={token.fruit} defectType={defectType} seed={token.id} />
       {extra > 1 && <group position={[-0.32, 0, 0.18]}><FruitBody fruit={token.fruit} defectType={null} seed={`${token.id}b`} /></group>}
@@ -339,7 +340,7 @@ function MovingFruit({ token, travelMs, pileTarget, selected, onPick, registry, 
   </group>;
 }
 
-type Piled = { id: string; fruit: string | null; defectType: string | null; pos: THREE.Vector3 };
+type Piled = { id: string; kind: Kind; fruit: string | null; defectType: string | null; pos: THREE.Vector3; token: Fruit3D | null };
 
 function Burst({ at, color, count, onDone }: { at: THREE.Vector3; color: string; count: number; onDone: () => void }) {
   const group = useRef<THREE.Group>(null);
@@ -679,7 +680,7 @@ function ModelWave({ modelKey, reduced, withLight }: { modelKey: number; reduced
 }
 
 // Holographic stats panel floating near the start of the line (throughput / defect rate / last 5 minutes).
-const HOLO = { pos: [-1.6, 2.75, -4.3] as [number, number, number], w: 3.6, h: 2.0 };
+const HOLO = { pos: [-0.6, 3.5, -4.3] as [number, number, number], w: 5.4, h: 3.0 };
 function HoloPanel({ stats, reduced }: { stats: Props['stats']; reduced: boolean }) {
   const bars = stats.spark.length ? stats.spark : Array.from({ length: 60 }, () => ({ n: 0, defect: 0 }));
   const max = Math.max(1, ...bars.map((b) => b.n));
@@ -717,7 +718,7 @@ function HoloPanel({ stats, reduced }: { stats: Props['stats']; reduced: boolean
           <mesh ref={(el) => { badRefs.current[i] = el; }} geometry={barGeo} material={dm} position={[x, base, 0.012]} scale={[bw * 0.7, 0.002, 0.02]} />
         </group>;
       })}
-      <Html position={[0, HOLO.h / 2 - 0.32, 0]} center zIndexRange={[6, 0]} style={{ pointerEvents: 'none' }}>
+      <Html position={[0, HOLO.h / 2 - 0.4, 0]} center zIndexRange={[6, 0]} style={{ pointerEvents: 'none' }}>
         <div className="lv3d-holo">
           <div><b>{stats.epm.toLocaleString()}</b><span>ผล/นาที</span></div>
           <div className={Number(stats.defectRate) >= 30 ? 'bad' : Number(stats.defectRate) >= 15 ? 'warn' : ''}><b>{stats.defectRate}%</b><span>defect</span></div>
@@ -749,9 +750,9 @@ function CrateLabel({ kind, count, last, hit, fill, swapping }: { kind: Kind; co
 }
 
 // ---- Scene --------------------------------------------------------------------------------------
-type LineProps = Props & { env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
+type LineProps = Props & { env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
 
-function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, env, q, reduced, pickId, onPick, onCrate, registry }: LineProps) {
+function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
   const speed = useRef(0);
   const power = useRef(0);
   const scan = useRef<ScanState>({ active: 0, x: CAM.x, defect: false, flash: 0, flashDefect: false });
@@ -787,11 +788,13 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     const make = (kind: Kind, n: number) => Array.from({ length: Math.min(n, kind === 'good' ? 28 : 18) }, (_, i) => {
       const id = `seed-${kind}-${i}`;
       const fruit = seed.fruits.length ? seed.fruits[Math.floor(hash(id) * seed.fruits.length)] : 'apple';
-      return { id, fruit, defectType: kind === 'defect' ? ['rot', 'bruise', 'crack'][i % 3] : null, pos: pileSlot(kind, i, id) };
+      return { id, kind, fruit, defectType: kind === 'defect' ? ['rot', 'bruise', 'crack'][i % 3] : null, pos: pileSlot(kind, i, id), token: null };
     });
     return { good: make('good', seed.good), defect: make('defect', seed.defect) };
   });
   const pileRef = useRef(pile); pileRef.current = pile;
+  pileIndex.current = new Map([...pile.good, ...pile.defect].map((p) => [p.id, p]));
+  const glPile = useThree((st) => st.gl);
   const pileCount = useRef({ good: pile.good.length, defect: pile.defect.length });
   const [bursts, setBursts] = useState<{ key: string; at: THREE.Vector3; color: string }[]>([]);
   const [swap, setSwap] = useState<Record<Kind, Swap | null>>({ good: null, defect: null });
@@ -826,7 +829,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
         // reuse the slot this fruit aimed at (oldest fruit there leaves if the crate is still full)
         const clash = list.findIndex((p) => p.pos.distanceToSquared(pos) < 0.01);
         if (clash >= 0) list.splice(clash, 1);
-        list.push({ id: t.id, fruit: t.fruit, defectType: t.kind === 'defect' ? (t.count === 1 ? t.defectType ?? 'rot' : null) : null, pos: pos.clone() });
+        list.push({ id: t.id, kind: t.kind, fruit: t.fruit, defectType: t.kind === 'defect' ? (t.count === 1 ? t.defectType ?? 'rot' : null) : null, pos: pos.clone(), token: t });
         if (list.length > PILE_MAX) list.shift();
       }
       return next;
@@ -922,7 +925,9 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
 
     {tokens.map((t) => <MovingFruit key={t.id} token={t} travelMs={travelMs} pileTarget={targets.current.get(t.id) ?? CRATE[t.kind]}
       selected={pickId === t.id} onPick={onPick} registry={registry} q={q} reduced={reduced} />)}
-    {KINDS.flatMap((kind) => pile[kind].map((p) => <group key={`pile-${p.id}`} position={p.pos}>
+    {KINDS.flatMap((kind) => pile[kind].map((p) => <group key={`pile-${p.id}`} position={p.pos} userData={{ pileId: p.id }}
+      onClick={(e) => { e.stopPropagation(); onPile(p); }}
+      onPointerOver={(e) => { e.stopPropagation(); glPile.domElement.style.cursor = 'pointer'; }} onPointerOut={() => { glPile.domElement.style.cursor = ''; }}>
       <FruitBody fruit={p.fruit} defectType={p.defectType} seed={p.id} />
     </group>))}
     {bursts.map((b) => <Burst key={b.key} at={b.at} color={b.color} count={q.burst} onDone={() => setBursts((cur) => cur.filter((x) => x.key !== b.key))} />)}
@@ -931,7 +936,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
 
 // ---- Walk mode (first / third person) ------------------------------------------------------------
 // Pure viewing: the player only moves the camera around the line; nothing here writes data.
-const BOARD = { x: -7.2, z: -4.4, w: 4.4 };
+const BOARD = { x: -7.4, z: -4.4, w: 6.4, y: 2.75 };
 const SIREN_AT = { x: -2.4, z: -1.6 };
 const EYE = 1.6; const PLAYER_R = 0.35; const BOUND = 32;
 // Obstacles as capsules on the floor (a point when a = b): r = radius, h = height the player can jump over.
@@ -962,7 +967,7 @@ const WARPS: { key: string; label: string; x: number; z: number; yaw: number }[]
   { key: 'fork', label: 'ทางแยก', x: 1.2, z: 2.6, yaw: 0.25 },
   { key: 'good', label: 'ตะกร้าดี', x: CRATE.good.x - 2.7, z: CRATE.good.z + 0.4, yaw: -Math.PI / 2 + 0.15 },
   { key: 'defect', label: 'ตะกร้าเสีย', x: CRATE.defect.x - 2.4, z: CRATE.defect.z + 0.9, yaw: -Math.PI / 2 + 0.36 },
-  { key: 'board', label: 'กระดาน KPI', x: BOARD.x, z: BOARD.z + 4.2, yaw: 0 },
+  { key: 'board', label: 'กระดาน KPI', x: BOARD.x, z: BOARD.z + 5.2, yaw: 0 },
 ];
 
 function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; phase: React.MutableRefObject<number> }) {
@@ -995,8 +1000,9 @@ function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; pha
   </group>;
 }
 
-function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson }: {
+function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAim }: {
   person: Person; warp: Warp; onMove: (x: number, z: number, yaw: number) => void; onNear: (kind: Kind | null) => void;
+  onAim: (hit: { pileId?: string; tokenId?: string }) => void;
   onInteract: () => void; onTogglePerson: () => void;
 }) {
   const camera = useThree((s) => s.camera);
@@ -1008,8 +1014,9 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson }: {
   const moving = useRef(0); const phase = useRef(0);
   const avatar = useRef<THREE.Group>(null);
   const near = useRef<Kind | null>(null);
-  const cbs = useRef({ onMove, onNear, onInteract, onTogglePerson });
-  cbs.current = { onMove, onNear, onInteract, onTogglePerson };
+  const cbs = useRef({ onMove, onNear, onInteract, onTogglePerson, onAim });
+  cbs.current = { onMove, onNear, onInteract, onTogglePerson, onAim };
+  const scene = useThree((st) => st.scene);
   const colliders = (COLLIDERS ??= buildColliders());
   useEffect(() => { pos.current.set(warp.x, 0, warp.z); look.current = { yaw: warp.yaw, pitch: -0.05 }; vy.current = 0; }, [warp]);
   useEffect(() => {
@@ -1035,13 +1042,26 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson }: {
     };
     window.addEventListener('keydown', down); window.addEventListener('keyup', up); window.addEventListener('blur', blur);
     document.addEventListener('mousemove', mouse);
+    const ray = new THREE.Raycaster(); ray.far = 9;
+    const centre = new THREE.Vector2(0, 0);
+    const shoot = (e: MouseEvent) => {
+      if (e.button !== 0 || document.pointerLockElement !== gl.domElement) return;
+      ray.setFromCamera(centre, camera);
+      for (const hit of ray.intersectObjects(scene.children, true)) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o && !o.userData.pileId && !o.userData.tokenId) o = o.parent;
+        if (o) { cbs.current.onAim({ pileId: o.userData.pileId, tokenId: o.userData.tokenId }); return; }
+      }
+    };
+    document.addEventListener('mousedown', shoot);
     return () => {
       window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur);
       document.removeEventListener('mousemove', mouse);
+      document.removeEventListener('mousedown', shoot);
       camera.rotation.order = prev;
       persp.fov = prevFov; persp.updateProjectionMatrix();
     };
-  }, [camera, gl]);
+  }, [camera, gl, scene]);
   const fwd = useMemo(() => new THREE.Vector3(), []); const right = useMemo(() => new THREE.Vector3(), []);
   const mv = useMemo(() => new THREE.Vector3(), []); const want = useMemo(() => new THREE.Vector3(), []);
   useFrame((_, rawDt) => {
@@ -1140,9 +1160,9 @@ function KpiBoard({ kpi }: { kpi: Props['kpi'] }) {
   }, [key, canvas, tex]);
   const sh = (BOARD.w - 0.2) * (520 / 1024);
   return <group position={[BOARD.x, 0, BOARD.z]}>
-    {[-1, 1].map((s) => <mesh key={s} geometry={g.box} position={[s * (BOARD.w / 2 - 0.15), 1.25, -0.05]} scale={[0.14, 2.5, 0.14]} material={std('#3b4246', { metalness: 0.3, roughness: 0.5 })} castShadow />)}
-    <mesh geometry={g.box} position={[0, 2.5, -0.06]} scale={[BOARD.w, sh + 0.25, 0.12]} material={std('#1d2427', { roughness: 0.6 })} castShadow />
-    <mesh position={[0, 2.5, 0.005]}><planeGeometry args={[BOARD.w - 0.2, sh]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
+    {[-1, 1].map((s) => <mesh key={s} geometry={g.box} position={[s * (BOARD.w / 2 - 0.2), BOARD.y / 2, -0.05]} scale={[0.18, BOARD.y, 0.18]} material={std('#3b4246', { metalness: 0.3, roughness: 0.5 })} castShadow />)}
+    <mesh geometry={g.box} position={[0, BOARD.y, -0.06]} scale={[BOARD.w, sh + 0.25, 0.12]} material={std('#1d2427', { roughness: 0.6 })} castShadow />
+    <mesh position={[0, BOARD.y, 0.005]}><planeGeometry args={[BOARD.w - 0.2, sh]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
   </group>;
 }
 
@@ -1312,6 +1332,14 @@ export default function LiveScene3D(props: Props) {
   const enterWalk = () => { setPick(null); setCrateOpen(null); setWalk(true); setWarp((w) => ({ ...WARPS[0], n: w.n + 1 })); };
   const exitWalk = () => { unlockMouse(); setWalk(false); setNear(null); setCam((c) => ({ key: 'overview', nonce: c.nonce + 1 })); };
   const interact = () => { const k = nearRef.current; if (!k) return; unlockMouse(); setCrateOpen(k); };
+  const pileIndex = useRef(new Map<string, Piled>());
+  const onPile = (p: Piled) => setPick({ token: p.token ?? { id: p.id, kind: p.kind, fruit: p.fruit, count: 1, conf: null, defectType: p.defectType, track: null, spawnedAt: 0, seed: true }, landed: true, follow: false });
+  const onAim = (hit: { pileId?: string; tokenId?: string }) => {
+    const p = hit.pileId ? pileIndex.current.get(hit.pileId) : undefined;
+    if (p) { onPile(p); return; }
+    const t = hit.tokenId ? props.tokens.find((x) => x.id === hit.tokenId) : undefined;
+    if (t) setPick({ token: t, landed: false, follow: false });
+  };
   const onMove = (x: number, z: number, yaw: number) => marker.current?.setAttribute('transform', `translate(${x.toFixed(2)} ${z.toFixed(2)}) rotate(${(-yaw * 180 / Math.PI).toFixed(1)})`);
 
   // Fruit that landed since the page opened, newest first (crate panel)
@@ -1354,9 +1382,9 @@ export default function LiveScene3D(props: Props) {
     <Canvas className="lv3d-canvas" shadows dpr={[1, q.dpr]} camera={{ position: PRESETS.overview.pos, fov: 36 }} gl={{ antialias: true, powerPreference: 'high-performance' }}
       onPointerMissed={() => { if (!walk) setPick(null); }}>
       <PerformanceMonitor onDecline={decline} flipflops={3} />
-      <Line {...props} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} registry={registry} />
+      <Line {...props} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
       {walk
-        ? <Walker person={person} warp={warp} onMove={onMove} onNear={setNear} onInteract={interact} onTogglePerson={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))} />
+        ? <Walker person={person} warp={warp} onMove={onMove} onNear={setNear} onInteract={interact} onTogglePerson={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))} onAim={onAim} />
         : <>
           <OrbitControls makeDefault target={PRESETS.overview.target} enablePan={false} enableZoom={props.tv} enableDamping minDistance={3} maxDistance={30}
             minPolarAngle={0.02} maxPolarAngle={1.3} />
@@ -1372,7 +1400,7 @@ export default function LiveScene3D(props: Props) {
     {!walk && <div className="lv3d-cams" role="group" aria-label="มุมกล้อง">
       {(Object.keys(PRESETS) as PresetKey[]).map((key) => <button key={key} type="button" className={cam.key === key ? 'on' : ''} onClick={() => goPreset(key)}>{PRESETS[key].label}</button>)}
       <button type="button" className="walk" onClick={enterWalk}>เดินสำรวจ</button>
-      <span>คลิกผลไม้ / ตะกร้าเพื่อดูข้อมูล</span>
+      <span>คลิกผลไม้ (บนสายพานหรือในลัง) / ตะกร้าเพื่อดูข้อมูล</span>
     </div>}
     {walk && <>
       <div className="lv3d-cams" role="group" aria-label="วาร์ป">
@@ -1386,6 +1414,7 @@ export default function LiveScene3D(props: Props) {
         <b>โหมดเดินสำรวจ</b>
         <button type="button" onClick={lockMouse}>คลิกเพื่อเริ่มเดิน</button>
         <ul>
+          <li>คลิกซ้ายที่ผลไม้ (เล็งด้วยกากบาท) ดูข้อมูลลูกนั้น</li>
           <li><kbd>W A S D</kbd> เดิน · <kbd>Shift</kbd> วิ่ง · <kbd>Space</kbd> กระโดด</li>
           <li>เมาส์ หันมอง · <kbd>V</kbd> สลับมุมบุคคลที่ 1 / 3</li>
           <li><kbd>E</kbd> ดูข้อมูลตะกร้าเมื่ออยู่ใกล้ · กด <kbd>Alt</kbd> ค้างไว้ให้เมาส์โผล่ · <kbd>Esc</kbd> ปล่อยเมาส์</li>
@@ -1402,7 +1431,7 @@ export default function LiveScene3D(props: Props) {
 
     {pt && <div className={`lv3d-pick ${pt.kind}`}>
       <div className="lv3d-pick-head">
-        <b>{pt.count > 1 ? `กลุ่ม ×${pt.count}` : `#${pt.track ?? '-'}`}</b>
+        <b>{pt.seed ? 'ในลัง' : pt.count > 1 ? `กลุ่ม ×${pt.count}` : `#${pt.track ?? '-'}`}</b>
         <span>{stage}</span>
         <button type="button" title="เลิกติดตาม (Esc)" onClick={() => setPick(null)}><X size={13} /></button>
       </div>
@@ -1415,6 +1444,7 @@ export default function LiveScene3D(props: Props) {
         <dt>track_id</dt><dd>{pt.track ?? '-'}</dd>
         <dt>เวลา (CORE)</dt><dd>{pickTime(pt.ts)}</dd>
       </dl>
+      {pt.seed && <p className="lv3d-pick-note">ลูกตั้งต้นในลัง วาดจากยอดรวมตอนเปิดหน้า ไม่มีข้อมูลรายลูก</p>}
       {!pick?.follow && !pick?.landed && <button type="button" className="lv3d-pick-follow" onClick={() => setPick((p) => (p ? { ...p, follow: true } : p))}>ติดตามต่อ</button>}
     </div>}
   </div>;
