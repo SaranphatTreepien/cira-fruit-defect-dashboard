@@ -591,8 +591,8 @@ function Agv({ kind, swap, rim }: { kind: Kind; swap: Swap; rim: THREE.Material 
 }
 
 const TREES: { x: number; z: number; s: number; fruit: string }[] = [
-  { x: -9, z: -6.5, s: 1, fruit: 'orange' }, { x: -3, z: -7.5, s: 1.2, fruit: 'apple' }, { x: -0.6, z: -10.6, s: 1, fruit: 'orange' },
-  { x: 11.5, z: -7, s: 1.1, fruit: 'apple' }, { x: -17, z: 8.5, s: 0.9, fruit: 'apple' }, { x: -17.5, z: -3.5, s: 0.95, fruit: 'orange' },
+  { x: -10, z: -13, s: 1, fruit: 'orange' }, { x: -3.5, z: -13.4, s: 1.2, fruit: 'apple' }, { x: 3, z: -13, s: 1, fruit: 'orange' },
+  { x: 10, z: -13.4, s: 1.1, fruit: 'apple' }, { x: 18.5, z: -6.5, s: 1, fruit: 'orange' }, { x: -17, z: 8.5, s: 0.9, fruit: 'apple' }, { x: -17.5, z: -3.5, s: 0.95, fruit: 'orange' },
 ];
 function Tree({ x, z, s = 1, fruit }: { x: number; z: number; s?: number; fruit: string }) {
   const balls = useMemo(() => Array.from({ length: 8 }, (_, i) => {
@@ -684,7 +684,8 @@ function ModelWave({ modelKey, reduced, withLight }: { modelKey: number; reduced
 }
 
 // Holographic stats panel floating near the start of the line (throughput / defect rate / last 5 minutes).
-const HOLO = { pos: [-0.6, 3.5, -4.3] as [number, number, number], w: 5.4, h: 3.0 };
+// last screen of the board wall (6th slot, see WALL); glass panel with live bars
+const HOLO = { pos: [2.5 * (4.8 + 0.22), 2.9, -9.42] as [number, number, number], w: 4.8, h: 2.4 };
 function HoloPanel({ stats, reduced }: { stats: Props['stats']; reduced: boolean }) {
   const bars = stats.spark.length ? stats.spark : Array.from({ length: 60 }, () => ({ n: 0, defect: 0 }));
   const max = Math.max(1, ...bars.map((b) => b.n));
@@ -712,7 +713,7 @@ function HoloPanel({ stats, reduced }: { stats: Props['stats']; reduced: boolean
     glass.opacity = 0.07 + (reduced ? 0 : 0.02 * Math.sin(clock.elapsedTime * 7));
   });
   return <group>
-    <group position={HOLO.pos} rotation={[-0.08, 0.08, 0]}>
+    <group position={HOLO.pos}>
       <mesh material={glass}><planeGeometry args={[HOLO.w, HOLO.h]} /></mesh>
       <lineSegments geometry={frame} material={edge} />
       {bars.map((_, i) => {
@@ -729,14 +730,6 @@ function HoloPanel({ stats, reduced }: { stats: Props['stats']; reduced: boolean
           <em>5 นาทีล่าสุด</em>
         </div>
       </Html>
-    </group>
-    {/* projector on the floor */}
-    <group position={[HOLO.pos[0], 0, HOLO.pos[2]]}>
-      <mesh position={[0, 0.1, 0]} castShadow><cylinderGeometry args={[0.38, 0.45, 0.2, 12]} /><meshStandardMaterial color="#2b3236" /></mesh>
-      <mesh position={[0, 0.21, 0]}><cylinderGeometry args={[0.28, 0.28, 0.02, 16]} /><meshBasicMaterial color="#6ff7e4" toneMapped={false} /></mesh>
-      <mesh position={[0, (HOLO.pos[1] - HOLO.h / 2 + 0.2) / 2 + 0.1, 0]} material={beam}>
-        <cylinderGeometry args={[1.0, 0.28, HOLO.pos[1] - HOLO.h / 2 - 0.1, 16, 1, true]} />
-      </mesh>
     </group>
   </group>;
 }
@@ -925,6 +918,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     <HoloPanel stats={stats} reduced={reduced} />
 
     {TREES.map((t, i) => <Tree key={i} x={t.x} z={t.z} s={t.s} fruit={t.fruit} />)}
+    <BoardWall glow={mats.teal} />
     <KpiBoard kpi={kpi} />
     <HourlyBoard data={boardData} />
     <ParetoBoard crates={crates} />
@@ -947,13 +941,15 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
 // Pure viewing: the player only moves the camera around the line; nothing here writes data.
 type BoardDef = { x: number; z: number; rot: number; w: number; y: number; label: string };
 // rot: board faces (sin rot, 0, cos rot); stand in front and look at it with yaw = rot
-const BOARDS: Record<'kpi' | 'hourly' | 'pareto' | 'alerts' | 'system', BoardDef> = {
-  kpi: { x: -7.4, z: -4.4, rot: 0, w: 6.4, y: 2.75, label: 'กระดาน KPI' },
-  hourly: { x: 4.4, z: -9.4, rot: 0, w: 6.0, y: 2.75, label: 'รายชั่วโมง' },
-  pareto: { x: 13.8, z: 0.4, rot: -Math.PI / 2, w: 5.2, y: 2.6, label: 'ชนิดที่เสีย' },
-  alerts: { x: -14.4, z: 1.2, rot: 1.15, w: 5.0, y: 2.6, label: 'Alert' },
-  system: { x: -13.2, z: 6.8, rot: 1.0, w: 5.0, y: 2.6, label: 'สุขภาพระบบ' },
-};
+const WALL = { z: -9.5, y: 2.9, w: 4.8, gap: 0.22 };
+const WALL_KEYS = ['system', 'alerts', 'kpi', 'hourly', 'pareto'] as const;
+type BoardKey = (typeof WALL_KEYS)[number];
+const WALL_SLOTS = WALL_KEYS.length + 1; // + the holo panel at the right end
+const BOARD_LABEL: Record<BoardKey, string> = { system: 'สุขภาพระบบ', alerts: 'Alert', kpi: 'กระดาน KPI', hourly: 'รายชั่วโมง', pareto: 'ชนิดที่เสีย' };
+const BOARDS = Object.fromEntries(WALL_KEYS.map((k, i) => [k, {
+  x: (i - (WALL_SLOTS - 1) / 2) * (WALL.w + WALL.gap), z: WALL.z, rot: 0, w: WALL.w, y: WALL.y, label: BOARD_LABEL[k],
+}])) as Record<BoardKey, BoardDef>;
+const WALL_SPAN = WALL_SLOTS * WALL.w + (WALL_SLOTS - 1) * WALL.gap;
 const BOARD = BOARDS.kpi;
 const CONSOLE = { x: -5.6, z: 5.8 };
 const boardEnds = (b: BoardDef) => {
@@ -975,24 +971,23 @@ function buildColliders(): Capsule[] {
   }
   for (const s of [-1, 1]) cap(CAM.x, s * 1.2, CAM.x, s * 1.2, 0.28);
   for (const t of TREES) cap(t.x, t.z, t.x, t.z, 0.78 * t.s);
-  cap(HOLO.pos[0], HOLO.pos[2], HOLO.pos[0], HOLO.pos[2], 0.5);
   cap(SIREN_AT.x, SIREN_AT.z, SIREN_AT.x, SIREN_AT.z, 0.32);
-  for (const b of Object.values(BOARDS)) { const e = boardEnds(b); cap(e.x1, e.z1, e.x2, e.z2, 0.22); }
+  cap(-WALL_SPAN / 2 - 0.3, WALL.z - 0.1, WALL_SPAN / 2 + 0.3, WALL.z - 0.1, 0.4);
   cap(CONSOLE.x - 1.1, CONSOLE.z, CONSOLE.x + 1.1, CONSOLE.z, 0.55);
   return out;
 }
 let COLLIDERS: Capsule[] | null = null;
 
 type Person = 'first' | 'third';
-type Warp = { x: number; z: number; yaw: number; n: number };
-const WARPS: { key: string; label: string; x: number; z: number; yaw: number }[] = [
+type Warp = { x: number; z: number; yaw: number; pitch?: number; n: number };
+const WARPS: { key: string; label: string; x: number; z: number; yaw: number; pitch?: number }[] = [
   { key: 'start', label: 'จุดเริ่ม', x: -2.5, z: 7.6, yaw: 0 },
   { key: 'gate', label: 'ประตูสแกน', x: -6.4, z: 2.7, yaw: -0.45 },
   { key: 'fork', label: 'ทางแยก', x: 1.2, z: 2.6, yaw: 0.25 },
   { key: 'good', label: 'ตะกร้าดี', x: CRATE.good.x - 2.7, z: CRATE.good.z + 0.4, yaw: -Math.PI / 2 + 0.15 },
   { key: 'defect', label: 'ตะกร้าเสีย', x: CRATE.defect.x - 2.4, z: CRATE.defect.z + 0.9, yaw: -Math.PI / 2 + 0.36 },
   { key: 'console', label: 'ห้องควบคุม', x: CONSOLE.x, z: CONSOLE.z + 2.3, yaw: 0 },
-  ...Object.entries(BOARDS).map(([key, b]) => ({ key, label: b.label, x: b.x + Math.sin(b.rot) * 4.8, z: b.z + Math.cos(b.rot) * 4.8, yaw: b.rot })),
+  ...WALL_KEYS.map((key) => { const b = BOARDS[key]; return { key, label: b.label, x: b.x + Math.sin(b.rot) * 4.5, z: b.z + Math.cos(b.rot) * 4.5, yaw: b.rot, pitch: 0.24 }; }),
 ];
 type NearKey = Kind | 'console' | null;
 
@@ -1034,7 +1029,7 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
   const camera = useThree((s) => s.camera);
   const gl = useThree((s) => s.gl);
   const pos = useRef(new THREE.Vector3(warp.x, 0, warp.z));
-  const look = useRef({ yaw: warp.yaw, pitch: -0.05 });
+  const look = useRef({ yaw: warp.yaw, pitch: warp.pitch ?? -0.05 });
   const vy = useRef(0);
   const keys = useRef(new Set<string>());
   const moving = useRef(0); const phase = useRef(0);
@@ -1044,7 +1039,7 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
   cbs.current = { onMove, onNear, onInteract, onTogglePerson, onAim };
   const scene = useThree((st) => st.scene);
   const colliders = (COLLIDERS ??= buildColliders());
-  useEffect(() => { pos.current.set(warp.x, 0, warp.z); look.current = { yaw: warp.yaw, pitch: -0.05 }; vy.current = 0; }, [warp]);
+  useEffect(() => { pos.current.set(warp.x, 0, warp.z); look.current = { yaw: warp.yaw, pitch: warp.pitch ?? -0.05 }; vy.current = 0; }, [warp]);
   useEffect(() => {
     const prev = camera.rotation.order;
     camera.rotation.order = 'YXZ';
@@ -1185,11 +1180,46 @@ function CanvasBoard({ b, draw, version }: { b: BoardDef; draw: Draw; version: s
     void document.fonts?.ready.then(() => { if (alive) paint(); });
     return () => { alive = false; };
   }, [version, canvas, tex]);
-  const sh = (b.w - 0.2) * (BH / BW);
+  const sh = (b.w - 0.16) * (BH / BW);
   return <group position={[b.x, 0, b.z]} rotation={[0, b.rot, 0]}>
-    {[-1, 1].map((s) => <mesh key={s} geometry={g3.box} position={[s * (b.w / 2 - 0.2), b.y / 2, -0.05]} scale={[0.18, b.y, 0.18]} material={std('#3b4246', { metalness: 0.3, roughness: 0.5 })} castShadow />)}
-    <mesh geometry={g3.box} position={[0, b.y, -0.06]} scale={[b.w, sh + 0.25, 0.12]} material={std('#1d2427', { roughness: 0.6 })} castShadow />
-    <mesh position={[0, b.y, 0.005]}><planeGeometry args={[b.w - 0.2, sh]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
+    <mesh geometry={g3.box} position={[0, b.y, 0]} scale={[b.w, sh + 0.16, 0.1]} material={std('#11171a', { roughness: 0.4 })} />
+    <mesh position={[0, b.y, 0.052]}><planeGeometry args={[b.w - 0.16, sh]} /><meshBasicMaterial map={tex} toneMapped={false} /></mesh>
+  </group>;
+}
+
+// The frame the five screens hang on: back panel, legs, title banner with a light strip, plinth.
+function BoardWall({ glow }: { glow: THREE.Material }) {
+  const g3 = geo();
+  const sh = (WALL.w - 0.16) * (BH / BW);
+  const top = WALL.y + sh / 2 + 0.25; const bottom = WALL.y - sh / 2 - 0.25;
+  const span = WALL_SPAN + 0.5;
+  const banner = useMemo(() => {
+    const c = document.createElement('canvas'); c.width = 2048; c.height = 64;
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+    const paint = () => {
+      const g = c.getContext('2d'); if (!g) return;
+      const font = getComputedStyle(document.body).fontFamily || 'sans-serif';
+      g.fillStyle = '#0c1518'; g.fillRect(0, 0, 2048, 64);
+      g.fillStyle = '#7ff7e0'; g.font = `900 40px ${font}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText('CIRA CORE  ·  FRUIT SORTING  ·  LIVE OPERATIONS', 1024, 34);
+      t.needsUpdate = true;
+    };
+    paint(); void document.fonts?.ready.then(paint);
+    return t;
+  }, []);
+  useEffect(() => () => banner.dispose(), [banner]);
+  const frame = std('#1a2125', { roughness: 0.5, metalness: 0.2 });
+  const legs = WALL_SLOTS + 1;
+  return <group position={[0, 0, WALL.z]}>
+    <mesh geometry={g3.box} position={[0, (top + 0.12) / 2, -0.12]} scale={[span, top - 0.12, 0.14]} material={frame} castShadow receiveShadow />
+    {Array.from({ length: legs }, (_, i) => {
+      const x = (i - (legs - 1) / 2) * (WALL.w + WALL.gap);
+      return <mesh key={i} geometry={g3.box} position={[x, bottom / 2, -0.12]} scale={[0.22, bottom, 0.22]} material={frame} castShadow />;
+    })}
+    <mesh geometry={g3.box} position={[0, top + 0.3, -0.08]} scale={[span, 0.6, 0.24]} material={frame} castShadow />
+    <mesh position={[0, top + 0.3, 0.045]}><planeGeometry args={[span - 0.3, (span - 0.3) * (64 / 2048)]} /><meshBasicMaterial map={banner} toneMapped={false} /></mesh>
+    <mesh geometry={g3.box} position={[0, top + 0.02, 0.0]} scale={[span, 0.035, 0.05]} material={glow} />
+    <mesh geometry={g3.box} position={[0, 0.06, -0.1]} scale={[span + 0.6, 0.12, 0.9]} material={std('#2b3236', { roughness: 0.7 })} receiveShadow />
   </group>;
 }
 
@@ -1394,8 +1424,8 @@ function useBoardData() {
 // Top-down map of the line; the player marker is moved directly (no re-render per frame).
 function MiniMap({ markerRef, alert }: { markerRef: React.MutableRefObject<SVGGElement | null>; alert: Props['alert'] }) {
   const line = (a: THREE.Vector3, b: THREE.Vector3, cls: string, key: string) => <line key={key} x1={a.x} y1={a.z} x2={b.x} y2={b.z} className={cls} />;
-  return <svg className="lv3d-map" viewBox="-17 -11 34 22" aria-hidden="true">
-    <rect x={-17} y={-11} width={34} height={22} className="bg" />
+  return <svg className="lv3d-map" viewBox="-18 -14 36 24" aria-hidden="true">
+    <rect x={-18} y={-14} width={36} height={24} className="bg" />
     {line(new THREE.Vector3(START.x - 0.6, 0, 0), new THREE.Vector3(FORK.x + 0.4, 0, 0), 'belt', 'm')}
     {KINDS.map((k) => line(FORK, END[k], `belt ${k}`, k))}
     {KINDS.map((k) => <rect key={`c${k}`} x={CRATE[k].x - 1} y={CRATE[k].z - 0.75} width={2} height={1.5} className={`crate ${k}`} transform={`rotate(${-crateAngle(k) * 180 / Math.PI} ${CRATE[k].x} ${CRATE[k].z})`} />)}
@@ -1436,7 +1466,7 @@ function CratePanel({ kind, count, crates, recent, onClose }: { kind: Kind; coun
 // ---- Camera presets / follow ----------------------------------------------------------------------
 type PresetKey = 'overview' | 'gate' | 'fork' | 'top';
 const PRESETS: Record<PresetKey, { label: string; pos: [number, number, number]; target: [number, number, number] }> = {
-  overview: { label: 'ภาพรวม', pos: [-0.6, 9.2, 15.2], target: [-0.6, 0.6, 0] },
+  overview: { label: 'ภาพรวม', pos: [-0.6, 12.6, 19.6], target: [-0.6, 2.2, -3.0] },
   gate: { label: 'ประตูสแกน', pos: [-8.9, 3.7, 5.6], target: [-5, 1.15, 0] },
   fork: { label: 'ทางแยก', pos: [3.6, 4.4, 6.2], target: [1.0, 0.8, -0.1] },
   top: { label: 'มุมบน', pos: [0.4, 22, 0.9], target: [0.4, 0, 0] },
