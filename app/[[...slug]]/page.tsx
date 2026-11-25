@@ -2,6 +2,7 @@
 
 import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import {
   Activity, AlertTriangle, BarChart3, Bell, Bot, Boxes, Camera, Check, ChevronRight, CloudOff,
   Download, FileText, Gauge, History, Info, Leaf, LineChart, LogIn, LogOut, MessageCircle, MoreHorizontal,
@@ -9,6 +10,11 @@ import {
   Sparkles, Square, Tag, Timer, Trash2, TrendingDown, TrendingUp, UserCircle2, Users, Wifi, WifiOff,
   Zap, CircleDot, Monitor, X, Volume2, VolumeX, PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2, Repeat,
 } from 'lucide-react';
+// 3D sorting scene: loaded only when the 3D view is shown (three.js is large).
+const LiveScene3D = dynamic(() => import('@/components/LiveScene3D'), { ssr: false, loading: () => <div className="lv3d-loading">กำลังโหลดฉาก 3D...</div> });
+const hasWebGL = () => {
+  try { const c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); } catch { return false; }
+};
 type AuthUser = { id: number; email: string; name: string; role: 'admin' | 'viewer' };
 const AuthContext = createContext<{ user: AuthUser | null; logout: () => void }>({ user: null, logout: () => undefined });
 const useAuth = () => useContext(AuthContext);
@@ -238,7 +244,7 @@ type LiveHealth = { db: string; mqtt: string; internet: string };
 // One fruit on the belt (or a bundle of same-result fruit when the line is faster than the belt can show).
 // Each event is replayed at its CORE timestamp + a playback offset, so fruit flow one by one instead of
 // arriving as one pile per DB batch.
-type LiveToken = { id: string; batch: string; kind: 'good' | 'defect'; fruit: string | null; count: number; conf: number | null; defectType: string | null; track: number | null; model: string | null; modelSwitch: { from: string; to: string } | null };
+type LiveToken = { id: string; batch: string; kind: 'good' | 'defect'; fruit: string | null; count: number; conf: number | null; defectType: string | null; track: number | null; model: string | null; modelSwitch: { from: string; to: string } | null; spawnedAt: number };
 type LivePending = LiveToken & { at: number };
 
 const liveWindows = [{ v: 5, label: '5 นาที' }, { v: 15, label: '15 นาที' }, { v: 60, label: '1 ชม.' }, { v: 480, label: '8 ชม.' }, { v: 1440, label: '24 ชม.' }];
@@ -246,7 +252,8 @@ const fruitEmoji: Record<string, string> = { orange: '🍊', apple: '🍎', bana
 const LIVE_MIN_GAP_MS = 170; // between two fruit on the belt
 const LIVE_BACKLOG_MERGE = 10; // more due fruit than this: bundle them so the belt keeps up
 const LIVE_PLAYBACK_MARGIN_MS = 350;
-const LIVE_TRAVEL_MS = 3400; // must match .lv-token animation-duration in globals.css
+const LIVE_TRAVEL_MS = 3400; // 2D: must match .lv-token animation-duration in globals.css
+const LIVE_TRAVEL_3D_MS = 6000; // 3D: longer belts, slower fruit
 const liveTime = (value: string | null) => value ? new Intl.DateTimeFormat('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '-';
 const liveTimeTenth = (value: string | null) => {
   if (!value) return '-';
@@ -314,6 +321,7 @@ function SimulateView() {
   // Fruit waiting for their playback time. A ref (not state) so the 80 ms tick does not re-render;
   // queueVer bumps when it changes so the in-flight counts stay right.
   const pending = useRef<LivePending[]>([]);
+  const queuedIds = useRef(new Set<string>());
   const [, setQueueVer] = useState(0);
   const playbackOffset = useRef<number | null>(null);
   const [playbackLag, setPlaybackLag] = useState<number | null>(null);
@@ -328,6 +336,20 @@ function SimulateView() {
   const [powerKey, setPowerKey] = useState(0);
   const wasPlaying = useRef<boolean | null>(null);
   const [tv, setTv] = useState(false);
+  // 2D (image + CSS) or 3D (three.js) scene; 3D by default when WebGL works, choice remembered per browser.
+  const [view, setView] = useState<'2d' | '3d'>('2d');
+  const travel = useRef(LIVE_TRAVEL_MS);
+  travel.current = view === '3d' ? LIVE_TRAVEL_3D_MS : LIVE_TRAVEL_MS;
+  useEffect(() => {
+    let stored: string | null = null;
+    try { stored = window.localStorage.getItem('cira-live-view'); } catch { /* storage blocked */ }
+    if (stored !== '2d' && hasWebGL()) setView('3d');
+  }, []);
+  const toggleView = () => setView((v) => {
+    const next = v === '3d' ? '2d' : '3d';
+    try { window.localStorage.setItem('cira-live-view', next); } catch { /* storage blocked */ }
+    return next;
+  });
   const stageCardRef = useRef<HTMLDivElement | null>(null);
   const sfx = useLiveSfx();
   const alertFeed = useContext(AlertFeedContext);
@@ -379,11 +401,16 @@ function SimulateView() {
       }
       return {
         id: e.event_id, batch: e.created_at ?? '', kind: liveKind(e), fruit: e.fruit_type, count: 1, conf: e.confidence,
-        defectType: e.defect_type, track: e.track_id, model: e.model_version, modelSwitch,
+        defectType: e.defect_type, track: e.track_id, model: e.model_version, modelSwitch, spawnedAt: 0,
         at: Number.isNaN(ts) ? received : ts + offset,
       };
     });
-    pending.current = [...pending.current, ...items].sort((a, b) => a.at - b.at);
+    // an event can come back in a later poll (same created_at millisecond): queue each event_id once
+    const known = new Set([...pending.current.map((t) => t.id), ...queuedIds.current]);
+    const fresh = items.filter((t) => !known.has(t.id));
+    fresh.forEach((t) => { queuedIds.current.add(t.id); });
+    if (queuedIds.current.size > 2000) queuedIds.current = new Set([...queuedIds.current].slice(-1000));
+    pending.current = [...pending.current, ...fresh].sort((a, b) => a.at - b.at);
     setQueueVer((v) => v + 1);
   };
 
@@ -462,17 +489,19 @@ function SimulateView() {
         pending.current = queue.slice(1);
       }
       lastSpawn.current = now;
+      out = out.map((t) => ({ ...t, spawnedAt: now }));
+      const travelMs = travel.current;
       setQueueVer((v) => v + 1);
-      setTokens((current) => [...current, ...out]);
+      setTokens((current) => [...current, ...out.filter((t) => !current.some((c) => c.id === t.id))]);
       out.forEach((token) => {
         if (token.modelSwitch) {
           const sw = token.modelSwitch;
-          later(LIVE_TRAVEL_MS * 0.25, () => { setModelBanner({ key: Date.now(), ...sw }); sfx.play('switch'); });
-          later(LIVE_TRAVEL_MS * 0.25 + 6000, () => setModelBanner((b) => (b && b.to === sw.to ? null : b)));
+          later(travelMs * 0.25, () => { setModelBanner({ key: Date.now(), ...sw }); sfx.play('switch'); });
+          later(travelMs * 0.25 + 6000, () => setModelBanner((b) => (b && b.to === sw.to ? null : b)));
         }
-        if (token.kind === 'defect') later(LIVE_TRAVEL_MS * 0.47, () => setPaddleKey((k) => k + 1));
+        if (token.kind === 'defect') later(travelMs * 0.47, () => setPaddleKey((k) => k + 1));
         // Timer (not animationend) so baskets stay correct even if the tab is hidden.
-        later(LIVE_TRAVEL_MS, () => land(token));
+        later(travelMs, () => land(token));
       });
     }, 80);
     return () => window.clearInterval(id);
@@ -604,6 +633,7 @@ function SimulateView() {
             <h2>Sorting</h2>
             <span>{!live ? 'กำลังโหลด...' : playing ? (inFlight.length ? `● กำลังคัด ${inFlightCount('good') + inFlightCount('defect')} ผล` : '● รอผลไม้') : 'เครื่องหยุด'}{playbackLag != null && playing ? ` · ภาพหน่วง ~${playbackLag.toFixed(1)} วิ` : ''}</span>
             <div className="live-stage-tools">
+              <button type="button" className="lv-tool lv-tool-text" title={view === '3d' ? 'สลับเป็นฉาก 2D' : 'สลับเป็นฉาก 3D'} onClick={toggleView}>{view === '3d' ? '2D' : '3D'}</button>
               <button type="button" className="lv-tool" title={sfx.on ? 'ปิดเสียงฉาก' : 'เปิดเสียงฉาก'} aria-pressed={sfx.on} onClick={sfx.toggle}>{sfx.on ? <Volume2 size={14} /> : <VolumeX size={14} />}</button>
               <button type="button" className="lv-tool" title={tv ? 'ออกจากจอใหญ่ (Esc)' : 'โหมดจอใหญ่'} onClick={toggleTv}>{tv ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
             </div>
@@ -617,7 +647,11 @@ function SimulateView() {
             <div><span>{live?.device?.device_id ?? '-'}</span><strong className="small">{latest?.model_version ?? '-'}</strong></div>
           </div>}
           <div className={`live-stage ${live && !playing ? 'stopped' : ''} ${sceneAlert ? `alerting ${sceneAlert.level}` : ''}`} style={{ ['--belt-dur' as string]: beltDur } as React.CSSProperties}>
-            <div className="lv-scene">
+            <div className={`lv-scene ${view === '3d' ? 'lv3d' : ''}`}>
+              {view === '3d' && <LiveScene3D tokens={tokens} travelMs={LIVE_TRAVEL_3D_MS} playing={playing} paddleKey={paddleKey} modelKey={modelBanner?.key ?? 0} powerKey={powerKey}
+                alert={sceneAlert ? (sceneAlert.level === 'critical' ? 'critical' : 'warning') : null} tv={tv}
+                seed={{ good: shown.good, defect: shown.defect, fruits: live?.by_fruit.map((f) => f.fruit_type).filter((f) => f !== 'unknown') ?? [] }} />}
+              {view === '2d' && <>
               <svg className="lv-belts" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                 <polyline className={`lv-belt ${playing ? 'run' : winding ? 'wind' : ''}`} points="0,48 46,48 54,43 60,38 70,35.5 80,33 84,30" />
                 <polyline className={`lv-belt bad ${playing ? 'run' : winding ? 'wind' : ''}`} points="46,48 51,55 60,60 70,64.5 80,69 87,70" />
@@ -625,11 +659,12 @@ function SimulateView() {
               <div className={`lv-scan ${playing ? 'on' : ''}`} />
               <div className={`lv-gate-ring ${playing ? 'on' : ''}`} />
               <div key={`p${paddleKey}`} className={`lv-paddle ${paddleKey ? 'kick' : ''} ${playing ? 'on' : ''}`}><i /></div>
+              </>}
               <div className="lv-hud lv-hud-live"><i className={playing ? 'on' : ''} />{playing ? 'LIVE' : 'STOP'}<span>{live?.device?.device_id ?? '-'} · {live?.events_last_minute ?? 0} ผล/นาที</span></div>
               <div className="lv-hud lv-hud-cam"><Camera size={12} />AI VISION<span>{latest?.model_version ?? '-'} · {latest?.camera_view ?? '-'}</span></div>
-              <div className="lv-hud lv-hud-fork">AI DECISION</div>
+              {view === '2d' && <div className="lv-hud lv-hud-fork">AI DECISION</div>}
               {streak.now >= 5 && <div key={`s${Math.floor(streak.now / 10)}`} className={`lv-hud lv-streak ${streak.now >= 25 ? 'hot' : ''}`}>ดีติดกัน <b>{streak.now}</b><span>สูงสุด {streak.best}</span></div>}
-              {tokens.map((token) => {
+              {view === '2d' && tokens.map((token) => {
                 const pile = Array.from({ length: Math.min(token.count, 5) }, (_, i) => <span key={i}>{liveEmoji(token.fruit)}</span>);
                 const verdict = token.kind === 'defect' ? (token.defectType ?? 'เสีย') : 'ดี';
                 return <Fragment key={token.id}>
@@ -652,7 +687,7 @@ function SimulateView() {
                 <div className="lv-fill" title="สัดส่วนของผลที่ลงตะกร้าแล้วในช่วงนี้"><i style={{ width: `${shownSum ? (shown.defect / shownSum) * 100 : 0}%` }} /></div>
                 <em>{lastIn.defect ? `ล่าสุด ${lastIn.defect}` : ' '}</em>
               </div>
-              {bursts.map((burst) => <div key={burst.key} className={`lv-burst ${burst.kind}`}>
+              {view === '2d' && bursts.map((burst) => <div key={burst.key} className={`lv-burst ${burst.kind}`}>
                 <b>+{burst.count}</b><i className="ring" />
                 {Array.from({ length: 9 }, (_, i) => <i key={i} className="spark" style={{ ['--a' as string]: `${i * 40 + 10}deg`, ['--d' as string]: `${3 + (i % 3)}cqw` } as React.CSSProperties} />)}
               </div>)}

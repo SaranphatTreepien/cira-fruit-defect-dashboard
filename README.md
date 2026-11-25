@@ -144,7 +144,11 @@ npm run sim                                        # 30 ผล/นาที จ�
 npm run sim -- --rate 120 --defect-pct 60
 npm run sim -- --switch-model sim-v2 --switch-after 60
 npm run sim -- --bad-pct 5 --dup-pct 10            # ทดสอบการปฏิเสธ payload และกันนับซ้ำ
+npm run sim -- --scenario demo                     # กะจำลอง ~5 นาที: เร่งไลน์ → พีค → ล็อตเสีย → สลับโมเดล → กล้องหลุด → กลับมา
+npm run sim -- --scenario demo --loop --speed 2    # วนซ้ำไม่หยุด เร็วขึ้น 2 เท่า (ไว้เปิดโชว์)
 ```
+
+หน้า Live มีฉาก 2D / 3D (ปุ่ม 2D/3D, จำค่าไว้ในเบราว์เซอร์) และโหมดจอใหญ่ `/simulate?tv=1`
 
 ## npm scripts
 

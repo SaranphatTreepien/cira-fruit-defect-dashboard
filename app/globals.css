@@ -665,3 +665,24 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
   .lv-belt.run, .lv-belt.wind, .lv-scan.on, .lv-gate-ring.on, .lv-paddle.kick, .lv-paddle.kick i, .lv-burst i.spark, .lv-power-off, .live-stage.alerting .lv-scene::after { animation: none !important; }
   .lv-powerup { display: none; }
 }
+
+/* ---------- Live scene 3D (three.js canvas under the same HUD chips) ---------- */
+.lv-tool.lv-tool-text { width: auto; padding: 0 9px; font-size: 11px; font-weight: 900; letter-spacing: .04em; }
+.lv-scene.lv3d { background: #e7f1eb; }
+.live-stage-card.tv .lv-scene.lv3d { background: #07130f; }
+.lv3d-canvas { position: absolute !important; inset: 0; z-index: 0; }
+.lv3d-loading { position: absolute; inset: 0; display: grid; place-items: center; color: #6b7d74; font-size: 13px; }
+.lv-scene.lv3d .lv-hud-cam { left: 1.2%; top: 12%; }
+.lv-scene.lv3d .lv-streak { top: 21%; }
+.lv-scene.lv3d .lv-stats { display: none; }
+.live-stage-card.tv .lv-scene.lv3d .lv-stats { display: flex; }
+.lv-scene.lv3d .lv-bin.good { left: auto; right: 1.2%; top: 3%; }
+.lv-scene.lv3d .lv-bin.bad { left: auto; right: 1.2%; top: auto; bottom: 4%; }
+.lv-scene.lv3d .lv-power-off { background: rgba(6,22,16,.18); }
+.lv-scene.lv3d .lv-stopped { z-index: 8; }
+.lv3d-tag { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 7px; font: 900 11px/1.2 var(--font-thai), sans-serif; white-space: nowrap; color: #fff; transform: translateY(-4px); animation: lvBannerIn3d .25s ease-out; }
+.lv3d-tag i { font-style: normal; font-weight: 700; opacity: .8; font-size: 10px; }
+.lv3d-tag.scan { background: rgba(6,58,51,.88); color: #7ff7e0; border: 1px solid #33f0d0; box-shadow: 0 0 10px rgba(51,240,208,.6); }
+.lv3d-tag.good { background: #1fae62; box-shadow: 0 0 12px rgba(31,174,98,.7); }
+.lv3d-tag.defect { background: #ef7d2d; box-shadow: 0 0 12px rgba(239,125,45,.7); }
+@keyframes lvBannerIn3d { from { opacity: 0; transform: translateY(4px) scale(.85); } to { opacity: 1; transform: translateY(-4px); } }
