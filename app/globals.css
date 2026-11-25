@@ -833,3 +833,4 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 .lv3d-map .dog { fill: #d8a465; stroke: #fff; stroke-width: .15; }
 .lv3d-map .member { stroke: #fff; stroke-width: .12; }
 .lv3d-map .test { fill: #f2c230; }
+.lv3d-emerg button.mute { display: grid; place-items: center; padding: 6px 8px; background: rgba(255,255,255,.15); color: #fff; }

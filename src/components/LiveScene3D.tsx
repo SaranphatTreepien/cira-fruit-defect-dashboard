@@ -6,7 +6,7 @@
 import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { Grid, Html, OrbitControls, PerformanceMonitor, RoundedBox, Stars } from '@react-three/drei';
 import { Bloom, EffectComposer, Vignette } from '@react-three/postprocessing';
-import { Moon, Sun, Sunrise, Sunset, X } from 'lucide-react';
+import { Moon, Sun, Sunrise, Sunset, Volume2, VolumeX, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 
@@ -1640,6 +1640,30 @@ function meow() {
     o.start(t); vib.start(t); o.stop(t + d + 0.05); vib.stop(t + d + 0.05);
   } catch { /* audio not available */ }
 }
+// Siren for the emergency drills: "wail" (slow up/down sweep) for critical cases, "hi-lo" (two tones) for warnings.
+// Returns a stop function that fades it out.
+function startSiren(kind: 'wail' | 'hilo') {
+  try {
+    const ac = audioCtx(); if (!ac) return () => undefined;
+    const t = ac.currentTime;
+    const base = kind === 'wail' ? 1000 : 865;
+    const a = ac.createOscillator(); a.type = 'sawtooth'; a.frequency.value = base;
+    const b = ac.createOscillator(); b.type = 'square'; b.frequency.value = base; b.detune.value = 9;
+    const lfo = ac.createOscillator(); lfo.type = kind === 'wail' ? 'triangle' : 'square'; lfo.frequency.value = kind === 'wail' ? 0.3 : 1.1;
+    const depth = ac.createGain(); depth.gain.value = kind === 'wail' ? 420 : 95;
+    lfo.connect(depth); depth.connect(a.frequency); depth.connect(b.frequency);
+    const mixB = ac.createGain(); mixB.gain.value = 0.35;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2600; lp.Q.value = 0.7;
+    const g = ac.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.09, t + 0.3);
+    a.connect(lp); b.connect(mixB).connect(lp); lp.connect(g).connect(ac.destination);
+    [a, b, lfo].forEach((o) => o.start(t));
+    return () => {
+      const n = ac.currentTime;
+      g.gain.cancelScheduledValues(n); g.gain.setValueAtTime(g.gain.value, n); g.gain.linearRampToValueAtTime(0, n + 0.25);
+      [a, b, lfo].forEach((o) => { try { o.stop(n + 0.3); } catch { /* already stopped */ } });
+    };
+  } catch { return () => undefined; }
+}
 // Two short chihuahua yips: a falling squeak through a band-pass plus a puff of noise.
 function bark() {
   try {
@@ -2697,6 +2721,13 @@ export default function LiveScene3D(props: Props) {
     const id = window.setInterval(() => { if (Date.now() >= emerg.until) setEmerg(null); else tick((n) => n + 1); }, 1000);
     return () => window.clearInterval(id);
   }, [emerg]);
+  // siren sound while a drill runs (the drill is started by a click, so the browser lets it play); can be muted
+  const [sirenMuted, setSirenMuted] = useState(false);
+  const emergKind = emerg?.kind ?? null;
+  useEffect(() => {
+    if (!emergKind || sirenMuted) return;
+    return startSiren(EMERG[emergKind].level === 'critical' ? 'wail' : 'hilo');
+  }, [emergKind, sirenMuted]);
   const onEmerg = (k: Emerg) => { setTestMenu(false); setEmerg((cur) => (cur?.kind === k ? null : { kind: k, until: Date.now() + EMERG_SEC * 1000 })); };
   const dogMarker = useRef<SVGCircleElement | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -2868,6 +2899,7 @@ export default function LiveScene3D(props: Props) {
     {emerg && <div className="lv3d-emerg" role="status" style={{ ['--c' as string]: EMERG[emerg.kind].color }}>
       <b>จำลองเหตุ: {EMERG[emerg.kind].label}</b>
       <span>{EMERG[emerg.kind].desc} · โหมดทดสอบ แค่ภาพในฉาก ไม่ส่งคำสั่งและไม่กระทบระบบจริง · เหลือ {Math.max(0, Math.ceil((emerg.until - Date.now()) / 1000))} วิ</span>
+      <button type="button" className="mute" title={sirenMuted ? 'เปิดเสียงไซเรน' : 'ปิดเสียงไซเรน'} aria-pressed={!sirenMuted} onClick={() => setSirenMuted((v) => !v)}>{sirenMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}</button>
       <button type="button" onClick={() => setEmerg(null)}>ยกเลิก</button>
     </div>}
     {testMenu && <div className="lv3d-test" role="dialog" aria-label="จำลองเหตุฉุกเฉิน">
