@@ -7,7 +7,7 @@ import { Canvas, useFrame, useThree, type ThreeEvent } from '@react-three/fiber'
 import { Grid, Html, OrbitControls, PerformanceMonitor, RoundedBox, Stars } from '@react-three/drei';
 import { Bloom, EffectComposer, Vignette } from '@react-three/postprocessing';
 import { Moon, Sun, Sunrise, Sunset, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 
 type Kind = 'good' | 'defect';
@@ -64,8 +64,10 @@ const CRATE = {
   defect: END.defect.clone().add(dirOf('defect').multiplyScalar(1.35)).setY(0),
 };
 const crateAngle = (kind: Kind) => { const d = dirOf(kind); return -Math.atan2(d.z, d.x); };
-const CRATE_FLOOR = 0.12;
-const PILE_MAX = 40;
+const CRATE_FLOOR = 0.08;
+// 5 along the branch x 3 across, two layers = 30 fruit per crate (spacing keeps every fruit inside the slats)
+const PILE_COLS = 5; const PILE_ROWS = 3; const PILE_LAYER = PILE_COLS * PILE_ROWS;
+const PILE_MAX = PILE_LAYER * 2;
 const KINDS: Kind[] = ['good', 'defect'];
 
 // Timeline of one fruit, as a share of travelMs: 0-.16 to the gantry, .16-.36 slowly through it (scanned in
@@ -75,8 +77,12 @@ const SCAN = [0.22, 0.3] as const;
 const VERDICT = [0.46, 0.6] as const;
 const GATE_IN = new THREE.Vector3(CAM.x - 1, FRUIT_Y, 0);
 const GATE_OUT = new THREE.Vector3(CAM.x + 1, FRUIT_Y, 0);
+// Feed: each fruit comes out from under the elevator hood and rolls down a short chute onto the belt (START).
+const CHUTE_TOP = new THREE.Vector3(-12.0, 1.45, 0);
+const FEED_P = 0.035;
 function fruitPos(p: number, kind: Kind, target: THREE.Vector3, out: THREE.Vector3) {
-  if (p < 0.16) return out.lerpVectors(START, GATE_IN, p / 0.16);
+  if (p < FEED_P) { const t = p / FEED_P; return out.lerpVectors(CHUTE_TOP, START, t * t * 0.6 + t * 0.4); }
+  if (p < 0.16) return out.lerpVectors(START, GATE_IN, (p - FEED_P) / (0.16 - FEED_P));
   if (p < 0.36) return out.lerpVectors(GATE_IN, GATE_OUT, (p - 0.16) / 0.2);
   if (p < 0.5) return out.lerpVectors(GATE_OUT, FORK, easeIn((p - 0.36) / 0.14));
   if (p < 0.9) return out.lerpVectors(FORK, END[kind], (p - 0.5) / 0.4);
@@ -101,17 +107,17 @@ function hash(text: string) {
 }
 
 function pileSlot(kind: Kind, index: number, id: string) {
-  const perLayer = 10;
-  const layer = Math.floor(index / perLayer);
-  const i = index % perLayer;
-  const col = i % 5; const row = Math.floor(i / 5);
+  const layer = Math.floor(index / PILE_LAYER) % 2;
+  const i = index % PILE_LAYER;
+  const col = i % PILE_COLS; const row = Math.floor(i / PILE_COLS);
   const base = CRATE[kind];
   const dir = dirOf(kind); const side = new THREE.Vector3(-dir.z, 0, dir.x);
-  const jitter = (hash(id) - 0.5) * 0.12;
+  const ja = (hash(id) - 0.5) * 0.03; const jb = (hash(`${id}j`) - 0.5) * 0.03;
+  // the top layer sits a little shifted into the dips of the bottom one; both stay inside the crate walls
   return base.clone()
-    .add(side.multiplyScalar((col - 2) * 0.36 + jitter + (layer % 2) * 0.16))
-    .add(dir.clone().multiplyScalar((row - 0.5) * 0.42 + jitter))
-    .setY(CRATE_FLOOR + FRUIT_R + layer * 0.3);
+    .add(dir.clone().multiplyScalar((col - (PILE_COLS - 1) / 2) * 0.37 + (layer ? 0.05 : 0) + ja))
+    .add(side.multiplyScalar((row - (PILE_ROWS - 1) / 2) * 0.43 - (layer ? 0.05 : 0) + jb))
+    .setY(CRATE_FLOOR + FRUIT_R + layer * 0.38);
 }
 
 // ---- Time of day (Bangkok) -----------------------------------------------------------------------
@@ -137,7 +143,7 @@ const DAY_KEYS: [number, string, string, string, number, string, number, number]
   [24, '#0b1724', '#6a80b4', '#101a2a', 0.6, '#a9bbff', 0.75, 1],
 ];
 type Env = { sky: string; hemiSky: string; hemiGround: string; hemiI: number; sun: string; sunI: number; night: number;
-  ground: string; cell: string; section: string; sunPos: [number, number, number]; label: string; icon: 'sun' | 'rise' | 'set' | 'moon'; clock: string };
+  ground: string; grass: string; road: string; cell: string; section: string; sunPos: [number, number, number]; label: string; icon: 'sun' | 'rise' | 'set' | 'moon'; clock: string };
 const mix = (a: string, b: string, t: number) => `#${new THREE.Color(a).lerp(new THREE.Color(b), t).getHexString()}`;
 function envAt(hour: number, tv: boolean): Env {
   let i = 0;
@@ -147,8 +153,9 @@ function envAt(hour: number, tv: boolean): Env {
   let night = THREE.MathUtils.lerp(a[7], b[7], t);
   let sky = mix(a[1], b[1], t);
   let ground = mix('#eef5f0', '#111c22', night);
+  let grass = mix('#a8cf8a', '#12221a', night);
   let hemiI = THREE.MathUtils.lerp(a[4], b[4], t);
-  if (tv) { sky = mix(sky, '#07130f', 0.6); ground = mix(ground, '#0b1914', 0.6); night = Math.max(night, 0.4); hemiI *= 0.75; }
+  if (tv) { sky = mix(sky, '#07130f', 0.6); ground = mix(ground, '#0b1914', 0.6); grass = mix(grass, '#0b1914', 0.6); night = Math.max(night, 0.4); hemiI *= 0.75; }
   const dayT = clamp01((hour - 6) / 12);
   const isDay = hour >= 6 && hour <= 18.5;
   const ang = dayT * Math.PI;
@@ -158,7 +165,7 @@ function envAt(hour: number, tv: boolean): Env {
   const hh = Math.floor(hour); const mm = Math.floor((hour - hh) * 60);
   return {
     sky, hemiSky: mix(a[2], b[2], t), hemiGround: mix(a[3], b[3], t), hemiI,
-    sun: mix(a[5], b[5], t), sunI: THREE.MathUtils.lerp(a[6], b[6], t), night, ground,
+    sun: mix(a[5], b[5], t), sunI: THREE.MathUtils.lerp(a[6], b[6], t), night, ground, grass, road: mix('#cfae84', '#2a241c', Math.max(night, tv ? 0.5 : 0)),
     cell: mix('#d3e4d9', '#1d3a30', night), section: mix('#b7d6c3', '#2c6b55', night), sunPos, label, icon,
     clock: `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`,
   };
@@ -427,18 +434,21 @@ function Belt({ from, to, width, strip, speed, trim = [], lift = 0 }: {
   </group>;
 }
 
+const LENS_Y = 2.08; // bottom of the camera lens (apex of the scan cone)
 function Gantry({ beam, cone, head, scan, reduced }: { beam: THREE.Material; cone: THREE.MeshBasicMaterial; head: THREE.MeshStandardMaterial; scan: React.MutableRefObject<ScanState>; reduced: boolean }) {
   const laser = useRef<THREE.Group>(null);
   const lineMat = useMemo(() => new THREE.MeshBasicMaterial({ color: '#4dffe0', toneMapped: false, transparent: true, opacity: 0.95 }), []);
   const fanMat = useMemo(() => new THREE.MeshBasicMaterial({ color: '#4dffe0', toneMapped: false, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }), []);
   const fan = useMemo(() => {
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute([0, 2.42, 0, 0, BELT_Y + 0.03, -0.72, 0, BELT_Y + 0.03, 0.72], 3));
+    g.setAttribute('position', new THREE.Float32BufferAttribute([0, LENS_Y, 0, 0, BELT_Y + 0.03, -0.72, 0, BELT_Y + 0.03, 0.72], 3));
     return g;
   }, []);
   useEffect(() => () => { lineMat.dispose(); fanMat.dispose(); fan.dispose(); }, [lineMat, fanMat, fan]);
   const red = useMemo(() => new THREE.Color('#ff2a22'), []);
   const teal = useMemo(() => new THREE.Color('#4dffe0'), []);
+  const led = useMemo(() => new THREE.MeshBasicMaterial({ color: '#38f59a', toneMapped: false }), []);
+  useEffect(() => () => led.dispose(), [led]);
   useFrame(({ clock }) => {
     const s = scan.current; const t = clock.elapsedTime;
     // idle: slow sweep across the gate; scanning: locks onto the fruit and sweeps fast over it
@@ -450,7 +460,14 @@ function Gantry({ beam, cone, head, scan, reduced }: { beam: THREE.Material; con
     fanMat.color.copy(flashRed ? red : teal);
     fanMat.opacity = 0.06 + s.active * 0.16 + (flashRed ? 0.2 * s.flash : 0);
     cone.opacity = 0.08 + s.active * 0.2;
+    // status LED: red on a defect verdict, cyan while scanning, slow green blink when idle
+    led.color.set(flashRed ? '#ff2a22' : s.active > 0.3 ? '#4dffe0' : (reduced || Math.sin(t * 2.4) > -0.6) ? '#38f59a' : '#0d3a22');
   });
+  const g = geo();
+  const body = std('#2b3136', { metalness: 0.55, roughness: 0.38 });
+  const fin = std('#4a535a', { metalness: 0.6, roughness: 0.4 });
+  const steel = std('#a9b4ba', { metalness: 0.7, roughness: 0.3 });
+  const black = std('#14181b', { roughness: 0.5 });
   return <group position={[CAM.x, 0, 0]}>
     {[-1, 1].map((s) => <RoundedBox key={s} args={[0.32, 2.9, 0.32]} radius={0.06} position={[0, 1.45, s * 1.2]} castShadow>
       <meshStandardMaterial color="#f4f7f5" roughness={0.3} />
@@ -459,13 +476,30 @@ function Gantry({ beam, cone, head, scan, reduced }: { beam: THREE.Material; con
     <RoundedBox args={[0.7, 0.4, 2.75]} radius={0.08} position={[0, 2.95, 0]} castShadow>
       <meshStandardMaterial color="#f4f7f5" roughness={0.3} />
     </RoundedBox>
-    <RoundedBox args={[0.55, 0.3, 0.75]} radius={0.06} position={[0, 2.62, 0]} material={head} castShadow />
-    <mesh position={[0, 2.45, 0]} rotation={[Math.PI / 2, 0, 0]}>
-      <cylinderGeometry args={[0.12, 0.14, 0.08, 20]} />
-      <meshBasicMaterial color="#7ff7e0" toneMapped={false} />
-    </mesh>
-    <mesh position={[0, 1.6, 0]} material={cone}>
-      <coneGeometry args={[0.95, 1.7, 32, 1, true]} />
+    {/* machine-vision camera hanging under the beam, looking straight down at the belt */}
+    <group position={[0, 2.75, 0]}>
+      <mesh geometry={g.box} position={[0, -0.03, 0]} scale={[0.52, 0.06, 0.4]} material={steel} />
+      {[-1, 1].map((s) => <mesh key={s} geometry={g.box} position={[0, -0.09, s * 0.15]} scale={[0.06, 0.1, 0.04]} material={steel} />)}
+      <RoundedBox args={[0.36, 0.38, 0.32]} radius={0.035} position={[0, -0.32, 0]} material={body} castShadow />
+      {[-1, 1].flatMap((s) => [0, 1, 2, 3, 4].map((i) => <mesh key={`${s}${i}`} geometry={g.box} position={[s * 0.19, -0.18 - i * 0.065, 0]} scale={[0.035, 0.03, 0.28]} material={fin} />))}
+      {/* teal brand stripe (pulses blue when the model changes) + status LED */}
+      <mesh geometry={g.box} position={[0, -0.25, 0.162]} scale={[0.26, 0.035, 0.01]} material={head} />
+      <mesh geometry={g.box} position={[0, -0.25, -0.162]} scale={[0.26, 0.035, 0.01]} material={head} />
+      <mesh geometry={g.blob} position={[0.12, -0.37, 0.163]} scale={0.022} material={led} />
+      <mesh geometry={g.blob} position={[0.12, -0.37, -0.163]} scale={0.022} material={led} />
+      {/* cable gland on the back */}
+      <mesh position={[-0.12, -0.36, 0.17]} rotation={[Math.PI / 2, 0, 0]} material={black}><cylinderGeometry args={[0.03, 0.03, 0.06, 8]} /></mesh>
+      {/* lens: barrel, two knurled rings, light ring, glass */}
+      <mesh position={[0, -0.585, 0]} material={black}><cylinderGeometry args={[0.105, 0.115, 0.15, 20]} /></mesh>
+      <mesh position={[0, -0.545, 0]} material={steel}><cylinderGeometry args={[0.122, 0.122, 0.03, 20]} /></mesh>
+      <mesh position={[0, -0.615, 0]} material={steel}><cylinderGeometry args={[0.122, 0.122, 0.025, 20]} /></mesh>
+      <mesh position={[0, -0.665, 0]} rotation={[Math.PI / 2, 0, 0]} material={head}><torusGeometry args={[0.1, 0.018, 8, 24]} /></mesh>
+      <mesh position={[0, -0.665, 0]} material={mat('lens-glass', () => new THREE.MeshStandardMaterial({ color: '#0f2a3a', metalness: 0.9, roughness: 0.08, emissive: new THREE.Color('#1a6f72'), emissiveIntensity: 0.4 }))}>
+        <cylinderGeometry args={[0.075, 0.075, 0.012, 20]} />
+      </mesh>
+    </group>
+    <mesh position={[0, (LENS_Y + BELT_Y) / 2, 0]} material={cone}>
+      <coneGeometry args={[0.95, LENS_Y - BELT_Y, 32, 1, true]} />
     </mesh>
     <group ref={laser}>
       <mesh position={[0, BELT_Y + 0.025, 0]} rotation={[-Math.PI / 2, 0, 0]} material={lineMat}>
@@ -473,7 +507,7 @@ function Gantry({ beam, cone, head, scan, reduced }: { beam: THREE.Material; con
       </mesh>
       <mesh geometry={fan} material={fanMat} />
     </group>
-    <spotLight position={[0, 2.4, 0]} target-position={[CAM.x, 0, 0]} angle={0.5} penumbra={0.6} intensity={6} color="#6ff2dc" distance={4} />
+    <spotLight position={[0, LENS_Y - 0.05, 0]} target-position={[CAM.x, 0, 0]} angle={0.5} penumbra={0.6} intensity={6} color="#6ff2dc" distance={4} />
   </group>;
 }
 
@@ -544,7 +578,7 @@ function Agv({ kind, swap, rim }: { kind: Kind; swap: Swap; rim: THREE.Material 
   useEffect(() => () => beacon.dispose(), [beacon]);
   const dir = dirOf(kind); const station = CRATE[kind];
   const dock = station.clone().add(dir.clone().multiplyScalar(CW / 2 + 0.95));
-  const far = station.clone().add(dir.clone().multiplyScalar(11));
+  const far = station.clone().add(dir.clone().multiplyScalar(14.2)); // good side: out through the warehouse door
   const tmp = useMemo(() => new THREE.Vector3(), []);
   useFrame(({ clock }) => {
     const t = performance.now() - swap.start;
@@ -590,9 +624,10 @@ function Agv({ kind, swap, rim }: { kind: Kind; swap: Swap; rim: THREE.Material 
   </>;
 }
 
+// Potted trees (planters) around the viewpoint deck and in front of the warehouse; the orchard is ORCHARD.
 const TREES: { x: number; z: number; s: number; fruit: string }[] = [
-  { x: -10, z: -13, s: 1, fruit: 'orange' }, { x: -3.5, z: -13.4, s: 1.2, fruit: 'apple' }, { x: 3, z: -13, s: 1, fruit: 'orange' },
-  { x: 10, z: -13.4, s: 1.1, fruit: 'apple' }, { x: 18.5, z: -6.5, s: 1, fruit: 'orange' }, { x: -17, z: 8.5, s: 0.9, fruit: 'apple' }, { x: -17.5, z: -3.5, s: 0.95, fruit: 'orange' },
+  { x: -14.2, z: 12.8, s: 0.95, fruit: 'orange' }, { x: -3.8, z: 12.8, s: 0.9, fruit: 'apple' },
+  { x: 14, z: 11, s: 1, fruit: 'orange' }, { x: 18, z: 13.4, s: 1.1, fruit: 'apple' }, { x: -23.4, z: 9.6, s: 0.95, fruit: 'apple' },
 ];
 function Tree({ x, z, s = 1, fruit }: { x: number; z: number; s?: number; fruit: string }) {
   const balls = useMemo(() => Array.from({ length: 8 }, (_, i) => {
@@ -747,9 +782,9 @@ function CrateLabel({ kind, count, last, hit, fill, swapping }: { kind: Kind; co
 }
 
 // ---- Scene --------------------------------------------------------------------------------------
-type LineProps = Props & { boardData: BoardData | null; onConsole: () => void; env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
+type LineProps = Props & { meowKey: number; onCat: () => void; catMarker: React.MutableRefObject<SVGCircleElement | null>; boardData: BoardData | null; onConsole: () => void; env: Env; q: Q; reduced: boolean; pickId: string | null; onPick: (t: Fruit3D) => void; onCrate: (kind: Kind) => void; onPile: (p: Piled) => void; pileIndex: React.MutableRefObject<Map<string, Piled>>; registry: React.MutableRefObject<Map<string, THREE.Vector3>> };
 
-function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, crates, system, control, boardData, onConsole, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
+function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert, seed, bins, stats, kpi, crates, system, control, meowKey, onCat, catMarker, boardData, onConsole, env, q, reduced, pickId, onPick, onCrate, onPile, pileIndex, registry }: LineProps) {
   const speed = useRef(0);
   const power = useRef(0);
   const scan = useRef<ScanState>({ active: 0, x: CAM.x, defect: false, flash: 0, flashDefect: false });
@@ -782,7 +817,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
 
   // Crate piles: seeded from the window totals so crates are not empty on open, then grow as fruit land.
   const [pile, setPile] = useState<Record<Kind, Piled[]>>(() => {
-    const make = (kind: Kind, n: number) => Array.from({ length: Math.min(n, kind === 'good' ? 28 : 18) }, (_, i) => {
+    const make = (kind: Kind, n: number) => Array.from({ length: Math.min(n, kind === 'good' ? 18 : 9) }, (_, i) => {
       const id = `seed-${kind}-${i}`;
       const fruit = seed.fruits.length ? seed.fruits[Math.floor(hash(id) * seed.fruits.length)] : 'apple';
       return { id, kind, fruit, defectType: kind === 'defect' ? ['rot', 'bruise', 'crack'][i % 3] : null, pos: pileSlot(kind, i, id), token: null };
@@ -891,18 +926,27 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
 
   return <>
     <color attach="background" args={[env.sky]} />
-    <fog attach="fog" args={[env.sky, 22, 46]} />
+    <fog attach="fog" args={[env.sky, 30, 140]} />
     <hemisphereLight color={env.hemiSky} groundColor={env.hemiGround} intensity={env.hemiI} />
     <directionalLight ref={keyLight} position={env.sunPos} color={env.sun} intensity={env.sunI} castShadow={q.shadows}
       shadow-camera-left={-14} shadow-camera-right={14} shadow-camera-top={9} shadow-camera-bottom={-9} shadow-bias={-0.0004} />
     {q.stars > 0 && env.night > 0.5 && <Stars radius={70} depth={25} count={q.stars} factor={3} saturation={0} fade speed={reduced ? 0 : 0.4} />}
 
+    {/* grass all around, concrete slab under the warehouse (the grid only on the slab) */}
     <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-      <planeGeometry args={[90, 90]} />
+      <planeGeometry args={[420, 420]} />
+      <meshStandardMaterial color={env.grass} roughness={1} />
+    </mesh>
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[(SHED.x0 + SHED.x1) / 2, 0.012, (SHED.z0 + SHED.z1) / 2]} receiveShadow>
+      <planeGeometry args={[SHED.x1 - SHED.x0, SHED.z1 - SHED.z0]} />
       <meshStandardMaterial color={env.ground} roughness={0.9} />
     </mesh>
-    <Grid position={[0, 0.002, 0]} args={[60, 60]} cellSize={1} cellThickness={0.5} sectionSize={5} sectionThickness={1}
-      cellColor={env.cell} sectionColor={env.section} fadeDistance={34} fadeStrength={1.4} infiniteGrid />
+    <Grid position={[(SHED.x0 + SHED.x1) / 2, 0.02, (SHED.z0 + SHED.z1) / 2]} args={[SHED.x1 - SHED.x0, SHED.z1 - SHED.z0]} cellSize={1} cellThickness={0.5} sectionSize={5} sectionThickness={1}
+      cellColor={env.cell} sectionColor={env.section} fadeDistance={60} fadeStrength={1} />
+    <Warehouse />
+    <Scenery env={env} lite={q === QUALITY.low} reduced={reduced} />
+    <FeedLine speed={speed} reduced={reduced} />
+    <Cat meowKey={meowKey} onCat={onCat} reduced={reduced} marker={catMarker} />
 
     <Belt from={new THREE.Vector3(START.x - 0.6, 0, 0)} to={new THREE.Vector3(FORK.x + 0.4, 0, 0)} width={1.4} strip={mats.green} speed={speed} trim={[{ side: -1, end: 0.55 }, { side: 1, end: 0.55 }]} />
     <Belt from={new THREE.Vector3(FORK.x, 0, -0.1)} to={END.good.clone().add(dirOf('good').multiplyScalar(0.35))} width={1.3} strip={mats.green} speed={speed} trim={[{ side: 1, start: 2.1 }]} />
@@ -937,6 +981,719 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
   </>;
 }
 
+// ---- Site: warehouse, feed line, orchard and the rest of the scenery --------------------------------------
+// Far scenery is instanced (one draw call per part) and never casts shadows; birds/clouds drop out on the low level.
+
+const TEXS = new Map<string, THREE.CanvasTexture>();
+type Paint = (g: CanvasRenderingContext2D, w: number, h: number, font: string) => void;
+function canvasTex(key: string, w: number, h: number, paint: Paint) {
+  const hit = TEXS.get(key);
+  if (hit) return hit;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  const draw = () => {
+    const g = c.getContext('2d'); if (!g) return;
+    g.clearRect(0, 0, w, h);
+    paint(g, w, h, getComputedStyle(document.body).fontFamily || 'sans-serif');
+    t.needsUpdate = true;
+  };
+  draw(); void document.fonts?.ready.then(draw);
+  TEXS.set(key, t);
+  return t;
+}
+
+function leafShape(g: CanvasRenderingContext2D, x: number, y: number, len: number, wid: number, rot: number) {
+  g.save(); g.translate(x, y); g.rotate(rot);
+  g.fillStyle = '#2f8a3a';
+  g.beginPath(); g.moveTo(-len / 2, 0); g.quadraticCurveTo(0, -wid * 1.6, len / 2, 0); g.quadraticCurveTo(0, wid * 1.6, -len / 2, 0); g.fill();
+  g.strokeStyle = 'rgba(200,245,175,.55)'; g.lineWidth = Math.max(1, wid * 0.12);
+  g.beginPath(); g.moveTo(-len * 0.45, 0); g.lineTo(len * 0.42, 0); g.stroke();
+  g.restore();
+}
+// Group logo "ส้มหยุด": an orange with a bite, a stem and two leaves (drawn, no image files).
+function drawLogo(g: CanvasRenderingContext2D, cx: number, cy: number, r: number) {
+  leafShape(g, cx - r * 0.62, cy - r * 0.95, r * 1.0, r * 0.32, -0.45);
+  leafShape(g, cx + r * 0.52, cy - r * 1.16, r * 0.62, r * 0.22, -0.55);
+  g.strokeStyle = '#2f7a33'; g.lineCap = 'round'; g.lineWidth = r * 0.11;
+  g.beginPath(); g.moveTo(cx + r * 0.05, cy - r * 0.85); g.quadraticCurveTo(cx + r * 0.02, cy - r * 1.18, cx - r * 0.2, cy - r * 1.36); g.stroke();
+  const size = Math.ceil(r * 2.2);
+  const o = document.createElement('canvas'); o.width = o.height = size;
+  const k = o.getContext('2d'); if (!k) return;
+  const oc = size / 2;
+  const grad = k.createRadialGradient(oc - r * 0.3, oc - r * 0.35, r * 0.1, oc, oc, r);
+  grad.addColorStop(0, '#ffb347'); grad.addColorStop(0.65, '#f68a12'); grad.addColorStop(1, '#de6a06');
+  k.fillStyle = grad; k.beginPath(); k.arc(oc, oc, r, 0, Math.PI * 2); k.fill();
+  const bx = oc + r * 0.95; const by = oc - r * 0.02; const br = r * 0.42;
+  k.globalCompositeOperation = 'destination-out'; k.beginPath(); k.arc(bx, by, br, 0, Math.PI * 2); k.fill();
+  // pith rim and segments inside the bite (only where the fruit is)
+  k.globalCompositeOperation = 'source-atop';
+  k.strokeStyle = '#fff4df'; k.lineWidth = r * 0.1; k.beginPath(); k.arc(bx, by, br + r * 0.05, 0, Math.PI * 2); k.stroke();
+  k.fillStyle = '#ffa53a'; k.lineWidth = r * 0.035;
+  for (let i = 0; i < 4; i++) {
+    const a0 = Math.PI * 0.62 + i * 0.6; const a1 = a0 + 0.5;
+    k.beginPath(); k.arc(bx, by, br + r * 0.3, a0, a1); k.arc(bx, by, br + r * 0.12, a1, a0, true); k.closePath(); k.fill(); k.stroke();
+  }
+  k.globalCompositeOperation = 'source-over';
+  k.fillStyle = 'rgba(255,255,255,.3)'; k.beginPath(); k.ellipse(oc - r * 0.4, oc - r * 0.4, r * 0.2, r * 0.1, -0.7, 0, Math.PI * 2); k.fill();
+  g.drawImage(o, cx - oc, cy - oc);
+}
+const badgeTex = () => canvasTex('badge', 256, 256, (g, w, h, font) => {
+  g.fillStyle = '#ffffff'; g.beginPath(); g.roundRect(8, 8, 240, 240, 36); g.fill();
+  g.strokeStyle = '#1f6b33'; g.lineWidth = 6; g.stroke();
+  drawLogo(g, 122, 112, 54);
+  g.fillStyle = '#1f6b33'; g.font = `900 46px ${font}`; g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+  g.fillText('ส้มหยุด', 128, 226);
+});
+const badgeMat = () => mat('badge', () => new THREE.MeshStandardMaterial({ map: badgeTex(), transparent: true, alphaTest: 0.5, roughness: 0.8 }));
+const signTex = () => canvasTex('sign', 1024, 256, (g, w, h, font) => {
+  g.fillStyle = '#123828'; g.beginPath(); g.roundRect(4, 4, w - 8, h - 8, 28); g.fill();
+  g.strokeStyle = '#f68a12'; g.lineWidth = 8; g.stroke();
+  drawLogo(g, 150, 146, 74);
+  g.fillStyle = '#ffffff'; g.font = `900 128px ${font}`; g.textBaseline = 'alphabetic'; g.fillText('ส้มหยุด', 268, 158);
+  g.fillStyle = '#ffcf8a'; g.font = `700 34px ${font}`; g.fillText('ศูนย์คัดแยกผลไม้ · CIRA CORE', 274, 216);
+});
+const viewSignTex = () => canvasTex('view-sign', 512, 160, (g, w, h, font) => {
+  g.fillStyle = '#6b4a2e'; g.beginPath(); g.roundRect(4, 4, w - 8, h - 8, 18); g.fill();
+  g.fillStyle = '#fff3dc'; g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+  g.font = `900 64px ${font}`; g.fillText('จุดชมวิว', w / 2, 86);
+  g.font = `600 26px ${font}`; g.fillText('มองเห็นไลน์คัดแยกทั้งสาย', w / 2, 130);
+});
+const ribTex = () => canvasTex('ribs', 64, 64, (g) => {
+  g.fillStyle = '#ffffff'; g.fillRect(0, 0, 64, 64);
+  for (let x = 0; x < 64; x += 16) { g.fillStyle = 'rgba(0,0,0,.13)'; g.fillRect(x, 0, 5, 64); g.fillStyle = 'rgba(255,255,255,.7)'; g.fillRect(x + 6, 0, 2, 64); }
+});
+// corrugated sheet; repeat in sheets of 0.9 units
+const ribbed = (key: string, color: string, rx: number, ry = 1, side: THREE.Side = THREE.FrontSide) => mat(`rib:${key}`, () => {
+  const t = ribTex().clone(); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry);
+  return new THREE.MeshStandardMaterial({ color, map: t, roughness: 0.75, metalness: 0.15, side });
+});
+
+// Merge non-indexed copies of simple geometries (positions only; scenery uses flat shading).
+function mergeGeos(parts: THREE.BufferGeometry[]) {
+  const arrs = parts.map((p) => (p.index ? p.toNonIndexed() : p).attributes.position.array as Float32Array);
+  const out = new Float32Array(arrs.reduce((a, b) => a + b.length, 0));
+  let o = 0;
+  for (const a of arrs) { out.set(a, o); o += a.length; }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(out, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
+// One InstancedMesh from a list of matrices (and optional per-instance colours).
+function Inst({ geometry, material, matrices, colors }: { geometry: THREE.BufferGeometry; material: THREE.Material; matrices: THREE.Matrix4[]; colors?: THREE.Color[] }) {
+  const ref = useRef<THREE.InstancedMesh>(null);
+  useLayoutEffect(() => {
+    const m = ref.current; if (!m) return;
+    matrices.forEach((mx, i) => m.setMatrixAt(i, mx));
+    colors?.forEach((c, i) => m.setColorAt(i, c));
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+  }, [matrices, colors]);
+  return <instancedMesh ref={ref} args={[geometry, material, matrices.length]} frustumCulled={false} />;
+}
+type BoxItem = { p: [number, number, number]; s: [number, number, number]; r?: [number, number, number] };
+function boxMatrices(items: BoxItem[]) {
+  const o = new THREE.Object3D();
+  return items.map((b) => { o.position.set(...b.p); o.rotation.set(...(b.r ?? [0, 0, 0])); o.scale.set(...b.s); o.updateMatrix(); return o.matrix.clone(); });
+}
+function Boxes({ items, material }: { items: BoxItem[]; material: THREE.Material }) {
+  const matrices = useMemo(() => boxMatrices(items), [items]);
+  return <Inst geometry={geo().box} material={material} matrices={matrices} />;
+}
+
+// ---- Warehouse ("โกดัง"): steel frame, gable roof, open front; walls only at the back and the back half of the sides.
+const SHED = { x0: -21, x1: 21.5, z0: -11.2, z1: 7.5, eave: 9.8, ridge: 11.4, sideZ: -3, doorZ0: -11.1, doorZ1: -8.7, doorH: 3.4 };
+const SHED_CX = (SHED.x0 + SHED.x1) / 2; const SHED_W = SHED.x1 - SHED.x0;
+const SHED_ZC = (SHED.z0 + SHED.z1) / 2; const SHED_HALF = (SHED.z1 - SHED.z0) / 2;
+const SLOPE = Math.atan2(SHED.ridge - SHED.eave, SHED_HALF);
+const SHED_POSTS: [number, number][] = [[SHED.x0, SHED.z1], [SHED.x1, SHED.z1], [SHED.x0, 2.5], [SHED.x1, 2.5]];
+const roofY = (z: number) => SHED.ridge - Math.abs(z - SHED_ZC) * Math.tan(SLOPE);
+const SHED_FRAME: BoxItem[] = (() => {
+  const out: BoxItem[] = [];
+  const col = (x: number, z: number) => out.push({ p: [x, SHED.eave / 2, z], s: [0.36, SHED.eave, 0.36] });
+  [SHED.x0, -14, -7, 0, 7, 14, SHED.x1].forEach((x) => col(x, SHED.z0 + 0.25));
+  [...SHED_POSTS, [SHED.x0, SHED.sideZ], [SHED.x1, SHED.sideZ]].forEach(([x, z]) => col(x, z));
+  out.push({ p: [SHED_CX, SHED.eave - 0.1, SHED.z1], s: [SHED_W + 0.4, 0.22, 0.3] });
+  out.push({ p: [SHED_CX, SHED.eave - 0.1, SHED.z0], s: [SHED_W + 0.4, 0.22, 0.3] });
+  out.push({ p: [SHED_CX, SHED.ridge + 0.04, SHED_ZC], s: [SHED_W + 0.5, 0.16, 0.34] });
+  // rafters on both gable ends
+  for (const x of [SHED.x0, SHED.x1]) for (const side of [1, -1]) {
+    const len = SHED_HALF / Math.cos(SLOPE);
+    out.push({ p: [x, (SHED.ridge + SHED.eave) / 2, SHED_ZC + side * SHED_HALF / 2], s: [0.3, 0.26, len], r: [side * SLOPE, 0, 0] });
+  }
+  return out;
+})();
+// trusses and hanging lamps: only drawn while the camera is under the roof
+const TRUSS_X = [-14, -7, 0, 7, 14];
+const SHED_TRUSS: BoxItem[] = (() => {
+  const out: BoxItem[] = [];
+  const low = SHED.eave - 0.25; const len = SHED_HALF / Math.cos(SLOPE);
+  for (const x of TRUSS_X) {
+    out.push({ p: [x, low, SHED_ZC], s: [0.14, 0.14, SHED.z1 - SHED.z0] });
+    for (const side of [1, -1]) out.push({ p: [x, (SHED.ridge + SHED.eave) / 2 - 0.1, SHED_ZC + side * SHED_HALF / 2], s: [0.14, 0.16, len], r: [side * SLOPE, 0, 0] });
+    for (const dz of [-6.5, -3.2, 0, 3.2, 6.5]) { const z = SHED_ZC + dz; const top = roofY(z) - 0.15; out.push({ p: [x, (low + top) / 2, z], s: [0.08, top - low, 0.08] }); }
+  }
+  for (const x of [-10.5, -3.5, 3.5, 10.5]) for (const z of [-4.5, 1.5]) out.push({ p: [x, low - 0.7, z], s: [0.025, 1.3, 0.025] }, { p: [x, low - 1.38, z], s: [1.1, 0.12, 0.38] });
+  return out;
+})();
+const SHED_LAMPS: BoxItem[] = [-10.5, -3.5, 3.5, 10.5].flatMap((x) => [-4.5, 1.5].map((z) => ({ p: [x, SHED.eave - 0.25 - 1.45, z] as [number, number, number], s: [1.0, 0.03, 0.3] as [number, number, number] })));
+
+function Warehouse() {
+  const inside = useRef<THREE.Group>(null);
+  const top = useMemo(() => new THREE.MeshStandardMaterial({ color: '#b8c4c6', transparent: true, opacity: 0.3, depthWrite: false, roughness: 0.6, metalness: 0.2 }), []);
+  useEffect(() => () => top.dispose(), [top]);
+  useFrame(({ camera }) => {
+    // from above the roof is see-through (the boards and the line stay readable); from below it is solid
+    top.opacity = THREE.MathUtils.clamp(0.34 - (camera.position.y - 12) * 0.028, 0.08, 0.34);
+    if (inside.current) inside.current.visible = camera.position.y < SHED.eave - 0.3;
+  });
+  const steel = std('#5d6b73', { roughness: 0.5, metalness: 0.45 });
+  const wallCol = '#c6d1cd';
+  const backLen = SHED.sideZ - SHED.z0;
+  const len = SHED_HALF / Math.cos(SLOPE) + 0.05;
+  const gable = useMemo(() => {
+    const s = new THREE.Shape();
+    s.moveTo(-SHED.z0, SHED.eave); s.lineTo(-SHED.z1, SHED.eave); s.lineTo(-SHED_ZC, SHED.ridge); s.closePath();
+    return new THREE.ShapeGeometry(s);
+  }, []);
+  useEffect(() => () => gable.dispose(), [gable]);
+  const g = geo();
+  return <group>
+    <Boxes items={SHED_FRAME} material={steel} />
+    {/* back wall with a darker dado, side walls (back half), right wall with the AGV door */}
+    <mesh geometry={g.box} position={[SHED_CX, SHED.eave / 2, SHED.z0 - 0.08]} scale={[SHED_W, SHED.eave, 0.12]} material={ribbed('back', wallCol, SHED_W / 0.9)} receiveShadow />
+    <mesh geometry={g.box} position={[SHED_CX, 0.6, SHED.z0 + 0.0]} scale={[SHED_W, 1.2, 0.06]} material={std('#7c8a86', { roughness: 0.8 })} />
+    <mesh geometry={g.box} position={[SHED.x0 - 0.08, SHED.eave / 2, (SHED.z0 + SHED.sideZ) / 2]} scale={[0.12, SHED.eave, backLen]} material={ribbed('left', wallCol, backLen / 0.9)} />
+    <mesh geometry={g.box} position={[SHED.x1 + 0.08, SHED.eave / 2, (SHED.doorZ1 + SHED.sideZ) / 2]} scale={[0.12, SHED.eave, SHED.sideZ - SHED.doorZ1]} material={ribbed('right', wallCol, (SHED.sideZ - SHED.doorZ1) / 0.9)} />
+    <mesh geometry={g.box} position={[SHED.x1 + 0.08, (SHED.eave + SHED.doorH) / 2, (SHED.z0 + SHED.doorZ1) / 2]} scale={[0.12, SHED.eave - SHED.doorH, SHED.doorZ1 - SHED.z0]} material={ribbed('lintel', wallCol, (SHED.doorZ1 - SHED.z0) / 0.9)} />
+    {[SHED.doorZ0, SHED.doorZ1].map((z) => <mesh key={z} geometry={g.box} position={[SHED.x1 + 0.1, SHED.doorH / 2, z]} scale={[0.18, SHED.doorH, 0.14]} material={std('#f2c230', { roughness: 0.5 })} />)}
+    {[SHED.x0 - 0.02, SHED.x1 + 0.02].map((x) => <mesh key={x} geometry={gable} position={[x, 0, 0]} rotation={[0, Math.PI / 2, 0]} material={ribbed('gable', wallCol, 1.1, 1.1, THREE.DoubleSide)} />)}
+    {/* roof: see-through top sheet + solid corrugated underside (each face is culled from the other side) */}
+    {[1, -1].map((side) => {
+      const rot = side === 1 ? SLOPE - Math.PI / 2 : -(Math.PI / 2 + SLOPE);
+      const cz = SHED_ZC + side * SHED_HALF / 2; const cy = (SHED.ridge + SHED.eave) / 2;
+      return <group key={side}>
+        <mesh position={[SHED_CX, cy + 0.02, cz]} rotation={[rot, 0, 0]} material={top}><planeGeometry args={[SHED_W + 0.5, len]} /></mesh>
+        <mesh position={[SHED_CX, cy - 0.02, cz]} rotation={[rot + Math.PI, 0, 0]} material={ribbed('roof', '#d3dbda', SHED_W / 0.9)}><planeGeometry args={[SHED_W + 0.5, len]} /></mesh>
+      </group>;
+    })}
+    <group ref={inside}>
+      <Boxes items={SHED_TRUSS} material={steel} />
+      <Boxes items={SHED_LAMPS} material={mat('shed-lamp', () => new THREE.MeshBasicMaterial({ color: '#fff1cf', toneMapped: false }))} />
+    </group>
+    {/* "ส้มหยุด" sign over the open front, and one on the left gable wall facing the road */}
+    <group position={[-0.6, 10.42, SHED.z1 + 0.1]}>
+      <mesh geometry={g.box} position={[0, 0, -0.06]} scale={[4.75, 1.3, 0.1]} material={std('#1a2125', { roughness: 0.5 })} />
+      <mesh><planeGeometry args={[4.5, 1.125]} /><meshBasicMaterial map={signTex()} toneMapped={false} /></mesh>
+    </group>
+    <group position={[SHED.x0 - 0.2, 6.6, -7.1]} rotation={[0, -Math.PI / 2, 0]}>
+      <mesh geometry={g.box} position={[0, 0, -0.05]} scale={[6.2, 1.7, 0.08]} material={std('#1a2125', { roughness: 0.5 })} />
+      <mesh><planeGeometry args={[6, 1.5]} /><meshBasicMaterial map={signTex()} toneMapped={false} /></mesh>
+    </group>
+  </group>;
+}
+
+// ---- Orchard, hills, road, fence, clouds, birds, viewpoint ------------------------------------------
+const FENCE = 30.8;
+const VIEW = { x: -9, z: 14 };
+const BENCHES = [-2.3, 0, 2.3].map((dx) => ({ x: VIEW.x + dx, z: VIEW.z + 0.7 }));
+const VIEW_SIGN = { x: VIEW.x + 4.1, z: VIEW.z - 2.2 }; // beside the right end of the railing
+type TreeSpot = { x: number; z: number; s: number; fruit: 'orange' | 'apple'; rot: number };
+const ORCHARD: TreeSpot[] = (() => {
+  const out: TreeSpot[] = [];
+  const add = (x: number, z: number, fruit: TreeSpot['fruit']) => {
+    const k = `${x},${z}`;
+    out.push({ x: x + (hash(`ox${k}`) - 0.5) * 0.5, z: z + (hash(`oz${k}`) - 0.5) * 0.5, s: 0.85 + hash(`os${k}`) * 0.4, fruit, rot: hash(`or${k}`) * Math.PI * 2 });
+  };
+  [-15, -19.5, -24, -28.5].forEach((z, j) => { for (let x = -27; x <= 27.01; x += 4.5) add(x, z, j % 2 ? 'apple' : 'orange'); });
+  [-25, -28.5].forEach((x, j) => [-10.5, -6.5, 7, 11.5, 16, 20.5, 25].forEach((z) => add(x, z, j ? 'apple' : 'orange')));
+  [25.5, 29].forEach((x, j) => { for (let z = -10.5; z <= 25.6; z += 4) add(x, z, j ? 'orange' : 'apple'); });
+  for (let x = -20; x <= 20.01; x += 5) add(x, 28.5, 'orange');
+  return out;
+})();
+const HILLS = Array.from({ length: 16 }, (_, i) => {
+  const a = (i / 16) * Math.PI * 2 + (hash(`ha${i}`) - 0.5) * 0.3; const d = 95 + hash(`hd${i}`) * 40;
+  return { x: Math.cos(a) * d, z: Math.sin(a) * d, sx: 20 + hash(`hx${i}`) * 22, sy: 6 + hash(`hy${i}`) * 11, sz: 16 + hash(`hz${i}`) * 16, rot: hash(`hr${i}`) * 6.28 };
+});
+const CLOUDS = Array.from({ length: 8 }, (_, i) => ({ x: -150 + i * 40 + hash(`cx${i}`) * 20, y: 28 + hash(`cy${i}`) * 10, z: -95 + hash(`cz${i}`) * 150, s: 3 + hash(`cs${i}`) * 3, v: 0.5 + hash(`cv${i}`) * 0.6 }));
+const BIRDS = Array.from({ length: 5 }, (_, i) => ({ cx: -14 + i * 7, cz: -20 + (i % 2) * 26, r: 9 + i * 2.2, y: 13 + (i % 3) * 1.6, w: (0.22 + (i % 3) * 0.06) * (i % 2 ? 1 : -1), ph: i * 1.7 }));
+
+let SCENERY_GEO: ReturnType<typeof makeSceneryGeo> | null = null;
+function makeSceneryGeo() {
+  const ico = (r: number, d: number, x: number, y: number, z: number) => new THREE.IcosahedronGeometry(r, d).translate(x, y, z);
+  const fruitAt = (offset: number) => Array.from({ length: 11 }, (_, i) => {
+    const a = i * 2.4 + offset; const y = 1.75 + (i % 3) * 0.38; const rr = 0.98 - (i % 3) * 0.12;
+    return ico(0.11, 0, Math.cos(a) * rr, y, Math.sin(a) * rr);
+  });
+  const hill = new THREE.IcosahedronGeometry(1, 1);
+  const p = hill.attributes.position as THREE.BufferAttribute; const v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    const n = 1 + (hash(`h${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`) - 0.5) * 0.25;
+    v.multiplyScalar(n); v.y = Math.max(v.y, -0.1);
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  hill.computeVertexNormals();
+  const wing = new THREE.BufferGeometry();
+  wing.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0.1, 0, 0, -0.1, 0.6, 0.04, -0.06], 3));
+  wing.computeVertexNormals();
+  return {
+    trunk: new THREE.CylinderGeometry(0.12, 0.18, 1.5, 6).translate(0, 0.75, 0),
+    canopy: mergeGeos([ico(1.0, 0, 0, 2.2, 0), ico(0.75, 0, 0.55, 1.95, 0.25), ico(0.68, 0, -0.48, 2.5, -0.22), ico(0.6, 0, 0.1, 2.0, -0.6)]),
+    orangeFruit: mergeGeos(fruitAt(0)), appleFruit: mergeGeos(fruitAt(0.7)),
+    hill,
+    cloud: mergeGeos([ico(1.2, 1, 0, 0, 0), ico(0.9, 1, 1.2, -0.2, 0.2), ico(0.85, 1, -1.15, -0.25, -0.1), ico(0.7, 1, 0.4, 0.45, -0.5), ico(0.65, 1, -0.5, 0.3, 0.55)]),
+    wing,
+  };
+}
+const sceneryGeo = () => (SCENERY_GEO ??= makeSceneryGeo());
+
+function Orchard() {
+  const g = sceneryGeo();
+  const { all, greens, oranges, apples } = useMemo(() => {
+    const o = new THREE.Object3D();
+    const m = (t: TreeSpot) => { o.position.set(t.x, 0, t.z); o.rotation.set(0, t.rot, 0); o.scale.setScalar(t.s); o.updateMatrix(); return o.matrix.clone(); };
+    const shades = ['#4fae55', '#3f9b4b', '#5cbd5f', '#47a24f', '#56b65a'];
+    return {
+      all: ORCHARD.map(m),
+      greens: ORCHARD.map((t) => new THREE.Color(shades[Math.floor(hash(`g${t.x},${t.z}`) * shades.length)])),
+      oranges: ORCHARD.filter((t) => t.fruit === 'orange').map(m),
+      apples: ORCHARD.filter((t) => t.fruit === 'apple').map(m),
+    };
+  }, []);
+  return <>
+    <Inst geometry={g.trunk} material={std('#7a5636', { flatShading: true })} matrices={all} />
+    <Inst geometry={g.canopy} material={std('#ffffff', { flatShading: true, roughness: 0.9 })} matrices={all} colors={greens} />
+    <Inst geometry={g.orangeFruit} material={std(FRUIT_COLOR.orange, { flatShading: true, roughness: 0.6 })} matrices={oranges} />
+    <Inst geometry={g.appleFruit} material={std(FRUIT_COLOR.apple, { flatShading: true, roughness: 0.5 })} matrices={apples} />
+  </>;
+}
+
+function Hills() {
+  const { matrices, colors } = useMemo(() => {
+    const o = new THREE.Object3D(); const shades = ['#7fb26a', '#6aa35c', '#8cbf73', '#5f9a57'];
+    return {
+      matrices: HILLS.map((h) => { o.position.set(h.x, 0, h.z); o.rotation.set(0, h.rot, 0); o.scale.set(h.sx, h.sy, h.sz); o.updateMatrix(); return o.matrix.clone(); }),
+      colors: HILLS.map((_, i) => new THREE.Color(shades[i % shades.length])),
+    };
+  }, []);
+  return <Inst geometry={sceneryGeo().hill} material={std('#ffffff', { flatShading: true, roughness: 1 })} matrices={matrices} colors={colors} />;
+}
+
+const FENCE_ITEMS: BoxItem[] = (() => {
+  const out: BoxItem[] = []; const gate = 3.2; const n = 24; const step = (2 * FENCE) / n;
+  const post = (x: number, z: number) => out.push({ p: [x, 0.55, z], s: [0.12, 1.1, 0.12] });
+  for (let i = 0; i <= n; i++) {
+    const t = -FENCE + i * step;
+    post(t, -FENCE); post(t, FENCE); post(FENCE, t);
+    if (Math.abs(t) > gate) post(-FENCE, t);
+  }
+  for (const y of [0.45, 0.85]) {
+    out.push({ p: [0, y, -FENCE], s: [2 * FENCE, 0.08, 0.05] }, { p: [0, y, FENCE], s: [2 * FENCE, 0.08, 0.05] }, { p: [FENCE, y, 0], s: [0.05, 0.08, 2 * FENCE] });
+    for (const s of [-1, 1]) out.push({ p: [-FENCE, y, s * (FENCE + gate) / 2], s: [0.05, 0.08, FENCE - gate] });
+  }
+  for (const s of [-1, 1]) out.push({ p: [-FENCE, 0.75, s * gate], s: [0.24, 1.5, 0.24] });
+  return out;
+})();
+
+function Clouds({ night, reduced }: { night: number; reduced: boolean }) {
+  const ref = useRef<THREE.InstancedMesh>(null);
+  const m = useMemo(() => new THREE.MeshStandardMaterial({ color: '#ffffff', flatShading: true, roughness: 1, fog: false, transparent: true, opacity: 0.92 }), []);
+  useEffect(() => () => m.dispose(), [m]);
+  useEffect(() => { m.color.set(mix('#ffffff', '#3a4660', night)); m.emissive.set(mix('#3d4044', '#000000', night)); }, [m, night]);
+  const o = useMemo(() => new THREE.Object3D(), []);
+  const place = (t: number) => {
+    const mesh = ref.current; if (!mesh) return;
+    CLOUDS.forEach((c, i) => {
+      const x = ((c.x + t * c.v + 160) % 320 + 320) % 320 - 160;
+      o.position.set(x, c.y, c.z); o.scale.set(c.s * 1.6, c.s * 0.8, c.s); o.updateMatrix(); mesh.setMatrixAt(i, o.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+  };
+  useLayoutEffect(() => place(0));
+  useFrame(({ clock }) => { if (!reduced) place(clock.elapsedTime); });
+  return <instancedMesh ref={ref} args={[sceneryGeo().cloud, m, CLOUDS.length]} frustumCulled={false} />;
+}
+
+function Birds() {
+  const refs = useRef<(THREE.Group | null)[]>([]);
+  const wing = sceneryGeo().wing;
+  const m = mat('bird', () => new THREE.MeshBasicMaterial({ color: '#2b2f33', side: THREE.DoubleSide }));
+  useFrame(({ clock }) => {
+    const t = clock.elapsedTime;
+    BIRDS.forEach((b, i) => {
+      const g = refs.current[i]; if (!g) return;
+      const a = b.ph + t * b.w;
+      g.position.set(b.cx + Math.cos(a) * b.r, b.y + Math.sin(t * 0.7 + b.ph) * 0.6, b.cz + Math.sin(a) * b.r);
+      g.rotation.y = Math.atan2(-Math.sin(a) * b.w, Math.cos(a) * b.w);
+      const flap = Math.sin(t * 9 + b.ph) * 0.6;
+      (g.children[1] as THREE.Object3D).rotation.z = flap; (g.children[2] as THREE.Object3D).rotation.z = -flap;
+    });
+  });
+  return <>{BIRDS.map((b, i) => <group key={i} ref={(el) => { refs.current[i] = el; }}>
+    <mesh geometry={geo().blob} scale={[0.07, 0.06, 0.2]} material={m} />
+    <mesh geometry={wing} material={m} />
+    <mesh geometry={wing} material={m} scale={[-1, 1, 1]} />
+  </group>)}</>;
+}
+
+const VIEW_ITEMS: BoxItem[] = (() => {
+  const out: BoxItem[] = [];
+  for (const b of BENCHES) {
+    out.push({ p: [b.x, 0.45, b.z], s: [1.7, 0.07, 0.44] }, { p: [b.x, 0.76, b.z + 0.24], s: [1.7, 0.4, 0.06], r: [-0.14, 0, 0] });
+    for (const s of [-1, 1]) out.push({ p: [b.x + s * 0.72, 0.225, b.z], s: [0.08, 0.45, 0.4] });
+  }
+  for (const s of [-1, 1]) {
+    const cx = VIEW.x + s * 2.1;
+    out.push({ p: [cx, 0.95, VIEW.z - 2.1], s: [2.6, 0.07, 0.07] }, { p: [cx, 0.55, VIEW.z - 2.1], s: [2.6, 0.05, 0.05] });
+    for (let i = 0; i < 5; i++) out.push({ p: [cx - 1.25 + i * 0.625, 0.48, VIEW.z - 2.1], s: [0.09, 0.96, 0.09] });
+  }
+  out.push({ p: [VIEW_SIGN.x, 0.7, VIEW_SIGN.z], s: [0.1, 1.4, 0.1] });
+  return out;
+})();
+function Viewpoint() {
+  const wood = std('#a0784e', { roughness: 0.85 });
+  return <group>
+    <mesh geometry={geo().box} position={[VIEW.x, 0.04, VIEW.z]} scale={[7, 0.08, 4.4]} material={std('#b88d5e', { roughness: 0.9 })} receiveShadow />
+    <Boxes items={VIEW_ITEMS} material={wood} />
+    {/* coin telescope pointing at the line */}
+    <group position={[VIEW.x - 1.6, 0, VIEW.z - 1.3]}>
+      <mesh position={[0, 0.55, 0]} material={std('#2f6b8a', { metalness: 0.5, roughness: 0.4 })}><cylinderGeometry args={[0.05, 0.08, 1.1, 8]} /></mesh>
+      <group position={[0, 1.2, 0]} rotation={[0.12, 0.25, 0]}>
+        <mesh rotation={[Math.PI / 2, 0, 0]} material={std('#2f6b8a', { metalness: 0.5, roughness: 0.4 })}><cylinderGeometry args={[0.1, 0.075, 0.5, 12]} /></mesh>
+        <mesh geometry={geo().box} position={[0, -0.12, 0.05]} scale={[0.22, 0.16, 0.2]} material={std('#f2c230')} />
+      </group>
+    </group>
+    <group position={[VIEW_SIGN.x, 1.45, VIEW_SIGN.z]}>
+      <mesh position={[0, 0, -0.03]} rotation={[0, Math.PI, 0]}><planeGeometry args={[1.3, 0.41]} /><meshStandardMaterial map={viewSignTex()} /></mesh>
+      <mesh position={[0, 0, 0.03]}><planeGeometry args={[1.3, 0.41]} /><meshStandardMaterial map={viewSignTex()} /></mesh>
+    </group>
+  </group>;
+}
+
+function Scenery({ env, lite, reduced }: { env: Env; lite: boolean; reduced: boolean }) {
+  const track = mix(env.road, '#000000', 0.2);
+  const roadLen = SHED.x0 + 220;
+  return <group>
+    <Orchard />
+    <Hills />
+    <Boxes items={FENCE_ITEMS} material={std('#9a7650', { roughness: 0.9 })} />
+    {/* dirt road from the far hills, through the fence gate, to the left opening of the warehouse */}
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[SHED.x0 - roadLen / 2, 0.008, 0]}><planeGeometry args={[roadLen, 4.6]} /><meshStandardMaterial color={env.road} roughness={1} /></mesh>
+    {[-0.8, 0.8].map((z) => <mesh key={z} rotation={[-Math.PI / 2, 0, 0]} position={[SHED.x0 - roadLen / 2, 0.011, z]}><planeGeometry args={[roadLen, 0.35]} /><meshStandardMaterial color={track} roughness={1} /></mesh>)}
+    <Viewpoint />
+    {!lite && <Clouds night={env.night} reduced={reduced} />}
+    {!lite && !reduced && <Birds />}
+  </group>;
+}
+
+// ---- Feed: pickup truck backed up to a hopper, an elevator up to a hood, then a short chute onto the belt ----
+const TRUCK_X = -17.6; // truck centre; its tail (+x) is at -15
+const HOPPER = { x: -14.35 };
+const ELEV_A = new THREE.Vector3(-14.1, 0.55, 0); const ELEV_B = new THREE.Vector3(-12.4, 1.55, 0);
+const ELEV_LEN = ELEV_A.distanceTo(ELEV_B); const ELEV_ANG = Math.atan2(ELEV_B.y - ELEV_A.y, ELEV_B.x - ELEV_A.x);
+const ELEV_N = new THREE.Vector3(-Math.sin(ELEV_ANG), Math.cos(ELEV_ANG), 0);
+const TAIL_FROM = new THREE.Vector3(-15.55, 1.25, 0); const TAIL_EDGE = new THREE.Vector3(-14.55, 1.16, 0); const TAIL_IN = new THREE.Vector3(-14.35, 0.72, 0);
+const FEED_PILE = (() => {
+  const out: { p: [number, number, number]; c: string; r: number }[] = [];
+  const add = (x: number, y: number, z: number) => {
+    const k = `${x.toFixed(2)},${y},${z.toFixed(2)}`;
+    out.push({ p: [x + (hash(`px${k}`) - 0.5) * 0.08, y + (hash(`py${k}`) - 0.5) * 0.04, z + (hash(`pz${k}`) - 0.5) * 0.08], c: ['#f08a12', '#f59a1c', '#e67a0a', '#f7a42e'][Math.floor(hash(`pc${k}`) * 4)], r: hash(`pr${k}`) * 6.28 });
+  };
+  const bx = (lx: number) => TRUCK_X + lx; // truck local x -> world
+  for (let i = 0; i < 7; i++) for (let j = 0; j < 4; j++) add(bx(0.0 + i * 0.4), 1.25, -0.56 + j * 0.373);
+  for (let i = 0; i < 5; i++) for (let j = 0; j < 3; j++) add(bx(0.2 + i * 0.4), 1.6, -0.37 + j * 0.37);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) add(bx(0.4 + i * 0.4), 1.93, -0.18 + j * 0.36);
+  [[-0.2, -0.25], [0.2, -0.3], [-0.25, 0.2], [0.18, 0.28], [0, 0], [-0.05, 0.42]].forEach(([dx, dz]) => add(HOPPER.x + dx, 0.7, dz));
+  return out;
+})();
+
+function FeedLine({ speed, reduced }: { speed: React.MutableRefObject<number>; reduced: boolean }) {
+  const g = geo();
+  const white = std('#f3f1ea', { roughness: 0.45, metalness: 0.1 });
+  const steel = std('#b7c1c6', { roughness: 0.4, metalness: 0.5 });
+  const dark = std('#3b4246', { roughness: 0.7 });
+  const glass = std('#1d2a33', { roughness: 0.1, metalness: 0.6 });
+  const accent = std('#f68a12', { roughness: 0.5 });
+  const fruitMat = mat('feed-fruit', () => new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.72, flatShading: true }));
+  const tex = useMemo(() => { const t = stripeTexture(); t.repeat.set(ELEV_LEN / 0.3, 1); return t; }, []);
+  useEffect(() => () => tex.dispose(), [tex]);
+  const wheel = useMemo(() => new THREE.CylinderGeometry(0.38, 0.38, 0.26, 14), []);
+  const hopperGeo = useMemo(() => new THREE.CylinderGeometry(0.85, 0.45, 0.55, 4, 1, true), []);
+  useEffect(() => () => { wheel.dispose(); hopperGeo.dispose(); }, [wheel, hopperGeo]);
+  const pile = useMemo(() => {
+    const o = new THREE.Object3D();
+    return {
+      matrices: FEED_PILE.map((f) => { o.position.set(...f.p); o.rotation.set(0, f.r, 0.3); o.scale.setScalar(1); o.updateMatrix(); return o.matrix.clone(); }),
+      colors: FEED_PILE.map((f) => new THREE.Color(f.c)),
+    };
+  }, []);
+  // 4 fruit riding the elevator + 3 tumbling off the tailgate into the hopper (only while the line runs)
+  const moving = useRef<THREE.InstancedMesh>(null);
+  const phase = useRef(0);
+  const o = useMemo(() => new THREE.Object3D(), []);
+  const tmp = useMemo(() => new THREE.Vector3(), []);
+  useLayoutEffect(() => {
+    const m = moving.current; if (!m) return;
+    for (let i = 0; i < 7; i++) m.setColorAt(i, new THREE.Color(i % 2 ? '#f59a1c' : '#f7a42e'));
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+  }, []);
+  useFrame((_, dt) => {
+    const v = speed.current;
+    tex.offset.x -= (v * dt * 0.5) / 0.3;
+    const on = v > 0.3 && !reduced;
+    phase.current += dt * (v / 3.6);
+    const m = moving.current; if (!m) return;
+    for (let i = 0; i < 7; i++) {
+      let show = on;
+      if (i < 4) {
+        const u = (phase.current * 0.9 + i / 4) % 1;
+        tmp.lerpVectors(ELEV_A, ELEV_B, u).addScaledVector(ELEV_N, FRUIT_R + 0.02);
+        show = show && u > 0.1 && u < 0.9;
+        o.rotation.set(0, 0, -u * 8);
+      } else {
+        const c = (phase.current * 0.7 + (i - 4) / 3) % 1;
+        if (c < 0.6) tmp.lerpVectors(TAIL_FROM, TAIL_EDGE, c / 0.6);
+        else { const k = (c - 0.6) / 0.4; tmp.lerpVectors(TAIL_EDGE, TAIL_IN, k); tmp.y = THREE.MathUtils.lerp(TAIL_EDGE.y, TAIL_IN.y, k * k); }
+        show = show && c < 0.95;
+        o.rotation.set(0, 0, -c * 9);
+      }
+      o.position.copy(tmp); o.scale.setScalar(show ? 1 : 0); o.updateMatrix();
+      m.setMatrixAt(i, o.matrix);
+    }
+    m.instanceMatrix.needsUpdate = true;
+  });
+  const elevMid = ELEV_A.clone().add(ELEV_B).multiplyScalar(0.5);
+  const surfY = (x: number) => ELEV_A.y + ((x - ELEV_A.x) / (ELEV_B.x - ELEV_A.x)) * (ELEV_B.y - ELEV_A.y);
+  return <group>
+    {/* pickup truck (white with the group stripe + logo on the doors), tail toward the hopper */}
+    <group position={[TRUCK_X, 0, 0]}>
+      <mesh geometry={g.box} position={[0.1, 0.62, 0]} scale={[4.9, 0.22, 1.45]} material={dark} />
+      {[[-1.75, -0.78], [-1.75, 0.78], [1.55, -0.78], [1.55, 0.78]].map(([x, z]) => <group key={`${x}${z}`} position={[x, 0.38, z]} rotation={[Math.PI / 2, 0, 0]}>
+        <mesh geometry={wheel} material={std('#1f2326', { roughness: 0.85 })} />
+        <mesh scale={[0.5, 1.04, 0.5]} geometry={wheel} material={steel} />
+      </group>)}
+      <mesh geometry={g.box} position={[-2.0, 1.0, 0]} scale={[1.2, 0.56, 1.72]} material={white} />
+      <mesh geometry={g.box} position={[-0.88, 1.22, 0]} scale={[1.12, 1.0, 1.72]} material={white} />
+      <mesh geometry={g.box} position={[-1.47, 1.45, 0]} rotation={[0, 0, -0.35]} scale={[0.04, 0.46, 1.5]} material={glass} />
+      {[-1, 1].map((s) => <mesh key={`w${s}`} geometry={g.box} position={[-0.8, 1.46, s * 0.865]} scale={[0.8, 0.36, 0.02]} material={glass} />)}
+      <mesh geometry={g.box} position={[-0.31, 1.46, 0]} scale={[0.02, 0.32, 1.4]} material={glass} />
+      <mesh geometry={g.box} position={[-1.42, 0.86, 0]} scale={[2.38, 0.09, 1.74]} material={accent} />
+      <mesh position={[-0.86, 1.06, 0.863]} material={badgeMat()}><planeGeometry args={[0.44, 0.44]} /></mesh>
+      <mesh position={[-0.86, 1.06, -0.863]} rotation={[0, Math.PI, 0]} material={badgeMat()}><planeGeometry args={[0.44, 0.44]} /></mesh>
+      <mesh geometry={g.box} position={[-2.63, 0.72, 0]} scale={[0.1, 0.16, 1.7]} material={dark} />
+      <mesh geometry={g.box} position={[-2.61, 1.02, 0]} scale={[0.03, 0.25, 0.9]} material={dark} />
+      {[-1, 1].map((s) => <mesh key={`h${s}`} geometry={g.box} position={[-2.615, 1.05, s * 0.65]} scale={[0.03, 0.12, 0.26]} material={mat('headlight', () => new THREE.MeshBasicMaterial({ color: '#fff6d8', toneMapped: false }))} />)}
+      {[-1, 1].map((s) => <mesh key={`m${s}`} geometry={g.box} position={[-1.3, 1.42, s * 0.98]} scale={[0.08, 0.14, 0.18]} material={dark} />)}
+      {/* bed with its load of oranges; tailgate open, resting on the hopper rim */}
+      <mesh geometry={g.box} position={[1.15, 1.0, 0]} scale={[2.85, 0.08, 1.62]} material={std('#5f6a70', { roughness: 0.7 })} />
+      {[-1, 1].map((s) => <mesh key={`b${s}`} geometry={g.box} position={[1.15, 1.25, s * 0.8]} scale={[2.85, 0.42, 0.06]} material={white} />)}
+      <mesh geometry={g.box} position={[-0.27, 1.25, 0]} scale={[0.06, 0.42, 1.62]} material={white} />
+      {[-1, 1].map((s) => <mesh key={`t${s}`} geometry={g.box} position={[2.58, 1.3, s * 0.79]} scale={[0.03, 0.2, 0.08]} material={mat('taillight', () => new THREE.MeshBasicMaterial({ color: '#ff3b2f', toneMapped: false }))} />)}
+      <mesh geometry={g.box} position={[2.82, 1.0, 0]} rotation={[0, 0, -0.12]} scale={[0.5, 0.05, 1.5]} material={white} />
+    </group>
+    <Inst geometry={g.orange} material={fruitMat} matrices={pile.matrices} colors={pile.colors} />
+    <instancedMesh ref={moving} args={[g.orange, fruitMat, 7]} frustumCulled={false} />
+    {/* receiving hopper */}
+    <group position={[HOPPER.x, 0, 0]}>
+      <mesh geometry={hopperGeo} position={[0, 0.725, 0]} rotation={[0, Math.PI / 4, 0]} scale={[1, 1, 1.15]} material={std('#b7c1c6', { roughness: 0.4, metalness: 0.5, side: THREE.DoubleSide })} />
+      {[-1, 1].map((s) => <mesh key={`x${s}`} geometry={g.box} position={[0, 1.0, s * 0.69]} scale={[1.25, 0.06, 0.06]} material={accent} />)}
+      {[-1, 1].map((s) => <mesh key={`z${s}`} geometry={g.box} position={[s * 0.6, 1.0, 0]} scale={[0.06, 0.06, 1.4]} material={accent} />)}
+      {[[-1, -1], [-1, 1], [1, -1], [1, 1]].map(([sx, sz]) => <mesh key={`l${sx}${sz}`} geometry={g.box} position={[sx * 0.42, 0.37, sz * 0.48]} scale={[0.07, 0.74, 0.07]} material={dark} />)}
+    </group>
+    {/* elevator (cleated belt) up to the hood */}
+    <group position={elevMid} rotation={[0, 0, ELEV_ANG]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]}><planeGeometry args={[ELEV_LEN, 0.62]} /><meshStandardMaterial map={tex} roughness={0.85} /></mesh>
+      <mesh geometry={g.box} position={[0, -0.07, 0]} scale={[ELEV_LEN, 0.12, 0.72]} material={steel} />
+      {[-1, 1].map((s) => <mesh key={s} geometry={g.box} position={[0, 0.06, s * 0.36]} scale={[ELEV_LEN, 0.16, 0.05]} material={accent} />)}
+    </group>
+    {[-13.55, -12.65].map((x) => [-1, 1].map((s) => <mesh key={`${x}${s}`} geometry={g.box} position={[x, (surfY(x) - 0.12) / 2, s * 0.3]} scale={[0.08, surfY(x) - 0.12, 0.08]} material={dark} />))}
+    <mesh geometry={g.box} position={[-12.3, 1.75, 0]} scale={[0.75, 0.62, 0.95]} material={steel} />
+    <mesh geometry={g.box} position={[-12.3, 1.75, 0]} scale={[0.77, 0.12, 0.97]} material={accent} />
+    <mesh geometry={g.box} position={[-12.3, 0.8, 0]} scale={[0.1, 1.6, 0.1]} material={dark} />
+    {/* chute from the hood onto the start of the main belt */}
+    <group position={[-11.65, 1.04, 0]} rotation={[0, 0, Math.atan2(-0.36, 0.8)]}>
+      <mesh geometry={g.box} scale={[0.88, 0.04, 0.6]} material={steel} />
+      {[-1, 1].map((s) => <mesh key={s} geometry={g.box} position={[0, 0.06, s * 0.3]} scale={[0.88, 0.12, 0.03]} material={accent} />)}
+    </group>
+  </group>;
+}
+
+// ---- Cat: salmon-orange tabby that wanders the site, sits, grooms and naps; click it for a "meow" -------
+const CAT_AREA = { x0: -19.5, x1: 19.5, z0: -8.6, z1: 15.5 };
+function catClear(x: number, z: number) {
+  if (x < CAT_AREA.x0 || x > CAT_AREA.x1 || z < CAT_AREA.z0 || z > CAT_AREA.z1) return false;
+  for (const c of allColliders()) {
+    const dx = c.bx - c.ax; const dz = c.bz - c.az; const len = dx * dx + dz * dz;
+    const t = len ? clamp01(((x - c.ax) * dx + (z - c.az) * dz) / len) : 0;
+    if (Math.hypot(x - (c.ax + dx * t), z - (c.az + dz * t)) < c.r + 0.3) return false;
+  }
+  return true;
+}
+function catPath(ax: number, az: number, bx: number, bz: number) {
+  const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / 0.3));
+  for (let i = 1; i <= n; i++) if (!catClear(ax + ((bx - ax) * i) / n, az + ((bz - az) * i) / n)) return false;
+  return true;
+}
+let AUDIO: AudioContext | null = null;
+// Synthesised "meow": a sawtooth that rises and falls through a moving band-pass (no sound files).
+function meow() {
+  try {
+    const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return;
+    AUDIO ??= new Ctx();
+    const ac = AUDIO; void ac.resume?.();
+    const t = ac.currentTime + 0.01; const k = 0.9 + Math.random() * 0.25;
+    const o = ac.createOscillator(); o.type = 'sawtooth';
+    o.frequency.setValueAtTime(430 * k, t);
+    o.frequency.linearRampToValueAtTime(760 * k, t + 0.14);
+    o.frequency.linearRampToValueAtTime(690 * k, t + 0.32);
+    o.frequency.exponentialRampToValueAtTime(360 * k, t + 0.62);
+    const vib = ac.createOscillator(); vib.frequency.value = 7;
+    const vg = ac.createGain(); vg.gain.value = 9; vib.connect(vg).connect(o.frequency);
+    const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 2.2;
+    f.frequency.setValueAtTime(800, t); f.frequency.linearRampToValueAtTime(1900, t + 0.16);
+    f.frequency.linearRampToValueAtTime(1300, t + 0.4); f.frequency.linearRampToValueAtTime(700, t + 0.62);
+    const v = ac.createGain();
+    v.gain.setValueAtTime(0.0001, t); v.gain.exponentialRampToValueAtTime(0.32, t + 0.05);
+    v.gain.setValueAtTime(0.3, t + 0.38); v.gain.exponentialRampToValueAtTime(0.0001, t + 0.66);
+    o.connect(f).connect(v).connect(ac.destination);
+    o.start(t); vib.start(t); o.stop(t + 0.7); vib.stop(t + 0.7);
+  } catch { /* audio not available */ }
+}
+const catFur = () => mat('cat-fur', () => new THREE.MeshStandardMaterial({
+  roughness: 0.95,
+  map: canvasTex('cat-stripes', 64, 128, (g, w, h) => {
+    g.fillStyle = '#f4a27c'; g.fillRect(0, 0, w, h);
+    g.fillStyle = '#d4693f';
+    for (let i = 0; i < 9; i++) {
+      const y = 8 + i * 13;
+      g.beginPath(); g.moveTo(0, y);
+      for (let x = 0; x <= w; x += 8) g.lineTo(x, y + Math.sin(x * 0.25 + i) * 2);
+      for (let x = w; x >= 0; x -= 8) g.lineTo(x, y + 5 + Math.sin(x * 0.3 + i * 2) * 2);
+      g.closePath(); g.fill();
+    }
+  }),
+}));
+type CatMode = 'walk' | 'sit' | 'groom' | 'lie';
+function Cat({ meowKey, onCat, reduced, marker }: { meowKey: number; onCat: () => void; reduced: boolean; marker: React.MutableRefObject<SVGCircleElement | null> }) {
+  const root = useRef<THREE.Group>(null); const hip = useRef<THREE.Group>(null); const upper = useRef<THREE.Group>(null);
+  const head = useRef<THREE.Group>(null); const tail = useRef<THREE.Group>(null); const tail2 = useRef<THREE.Group>(null);
+  const legs = useRef<(THREE.Group | null)[]>([]); // front left, front right, back left, back right
+  const gl = useThree((st) => st.gl);
+  const st = useRef({ x: 3, z: 6.4, yaw: -2.4, mode: 'sit' as CatMode, until: 0, tx: 0, tz: 0, ph: 0, walkK: 0, sitK: 1, lieK: 0, groomK: 0, meowAt: -10 });
+  const [bubble, setBubble] = useState(0);
+  useEffect(() => {
+    if (!meowKey) return;
+    meow();
+    const s = st.current; const now = performance.now() / 1000;
+    s.meowAt = now;
+    if (s.mode !== 'sit') { s.mode = 'sit'; s.until = now + 3; }
+    setBubble(meowKey);
+    const id = window.setTimeout(() => setBubble(0), 1600);
+    return () => window.clearTimeout(id);
+  }, [meowKey]);
+  useFrame((_, raw) => {
+    const dt = Math.min(raw, 0.05); const now = performance.now() / 1000; const s = st.current;
+    const rest = () => {
+      const r = Math.random();
+      s.mode = r < 0.4 ? 'sit' : r < 0.7 ? 'groom' : 'lie';
+      s.until = now + (s.mode === 'lie' ? 7 + Math.random() * 8 : 3 + Math.random() * 4);
+    };
+    if (!s.until) s.until = now + 2;
+    if (s.mode === 'walk') {
+      const dx = s.tx - s.x; const dz = s.tz - s.z; const d = Math.hypot(dx, dz);
+      let diff = Math.atan2(dx, dz) - s.yaw; diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      s.yaw += THREE.MathUtils.clamp(diff, -2.5 * dt, 2.5 * dt);
+      const step = Math.min(d, (Math.abs(diff) < 0.6 ? 0.45 : 0.08) * dt);
+      const nx = s.x + Math.sin(s.yaw) * step; const nz = s.z + Math.cos(s.yaw) * step;
+      if (d < 0.08 || !catClear(nx, nz)) rest();
+      else { s.x = nx; s.z = nz; s.ph += step * 13; }
+    } else if (now > s.until) {
+      if (reduced) { s.mode = s.mode === 'lie' ? 'sit' : 'lie'; s.until = now + 10; }
+      else if (Math.random() < 0.65) {
+        let found = false;
+        for (let i = 0; i < 14 && !found; i++) {
+          const a = Math.random() * Math.PI * 2; const dist = 1.5 + Math.random() * 6;
+          const tx = s.x + Math.sin(a) * dist; const tz = s.z + Math.cos(a) * dist;
+          if (catClear(tx, tz) && catPath(s.x, s.z, tx, tz)) { s.tx = tx; s.tz = tz; s.mode = 'walk'; found = true; }
+        }
+        if (!found) { s.mode = 'sit'; s.until = now + 2; }
+      } else rest();
+    }
+    const k = 1 - Math.exp(-dt * 5);
+    s.walkK += ((s.mode === 'walk' ? 1 : 0) - s.walkK) * k;
+    s.sitK += ((s.mode === 'sit' || s.mode === 'groom' ? 1 : 0) - s.sitK) * k;
+    s.lieK += ((s.mode === 'lie' ? 1 : 0) - s.lieK) * k;
+    s.groomK += ((s.mode === 'groom' ? 1 : 0) - s.groomK) * k;
+    if (root.current) { root.current.position.set(s.x, 0, s.z); root.current.rotation.y = s.yaw; }
+    if (marker.current) { marker.current.setAttribute('cx', s.x.toFixed(2)); marker.current.setAttribute('cy', s.z.toFixed(2)); }
+    if (hip.current) hip.current.position.y = 0.22 - 0.06 * s.sitK - 0.12 * s.lieK;
+    if (upper.current) upper.current.rotation.x = -0.55 * s.sitK;
+    const swing = Math.sin(s.ph) * 0.55 * s.walkK;
+    const L = legs.current;
+    const tuck = 1 - 0.68 * s.lieK;
+    if (L[0]) { L[0].rotation.x = swing + 0.55 * s.sitK; L[0].scale.y = (1 + 0.6 * s.sitK) * tuck; }
+    if (L[1]) { L[1].rotation.x = -swing + 0.55 * s.sitK - s.groomK * (1.3 + 0.25 * Math.sin(now * 7)); L[1].scale.y = (1 + 0.6 * s.sitK) * tuck; }
+    if (L[2]) { L[2].rotation.x = -swing - 1.1 * s.sitK - 1.2 * s.lieK; L[2].scale.y = (1 - 0.4 * s.sitK) * tuck; }
+    if (L[3]) { L[3].rotation.x = swing - 1.1 * s.sitK - 1.2 * s.lieK; L[3].scale.y = (1 - 0.4 * s.sitK) * tuck; }
+    const since = now - s.meowAt;
+    if (head.current) {
+      head.current.rotation.x = 0.45 * s.sitK + s.groomK * (0.55 + 0.2 * Math.sin(now * 7)) + 0.15 * s.lieK - (since < 0.9 ? 0.3 : 0);
+      head.current.rotation.y = s.groomK * 0.5 + (reduced ? 0 : Math.sin(now * 0.4) * 0.25 * (1 - s.walkK) * (1 - s.groomK));
+      head.current.rotation.z = since < 0.9 ? Math.sin(since * 12) * 0.15 : 0;
+    }
+    if (tail.current) tail.current.rotation.x = -0.75 + 0.35 * s.walkK - 0.8 * s.lieK + (reduced ? 0 : 0.15 * Math.sin(now * 1.6));
+    if (tail2.current) tail2.current.rotation.z = reduced ? 0.3 : Math.sin(now * 2.1) * 0.45;
+  });
+  const g = geo();
+  const fur = catFur(); const plain = std('#f4a27c', { roughness: 0.95 }); const stripe = std('#d4693f', { roughness: 0.95 });
+  const cream = std('#fbe3cf', { roughness: 0.95 }); const pink = std('#ef8f9c'); const eye = std('#1b2a1a', { roughness: 0.2 });
+  const ear = useMemo(() => new THREE.ConeGeometry(0.045, 0.09, 4), []);
+  const seg = useMemo(() => new THREE.CylinderGeometry(0.022, 0.03, 1, 6), []);
+  useEffect(() => () => { ear.dispose(); seg.dispose(); }, [ear, seg]);
+  const leg = (i: number, x: number, z: number, parentY: number) => <group key={i} ref={(el) => { legs.current[i] = el; }} position={[x, parentY, z]}>
+    <mesh geometry={g.box} position={[0, -0.1, 0]} scale={[0.05, 0.2, 0.055]} material={plain} />
+    <mesh geometry={g.blob} position={[0, -0.2, 0.012]} scale={[0.03, 0.018, 0.04]} material={cream} />
+  </group>;
+  return <group ref={root} userData={{ cat: true }}>
+    <group ref={hip} position={[0, 0.22, -0.14]}>
+      {leg(2, -0.065, 0, 0)}
+      {leg(3, 0.065, 0, 0)}
+      <group ref={upper}>
+        <mesh geometry={g.blob} position={[0, 0.02, 0.17]} rotation={[Math.PI / 2, 0, 0]} scale={[0.12, 0.25, 0.11]} material={fur} castShadow />
+        <mesh geometry={g.blob} position={[0, -0.04, 0.17]} scale={[0.095, 0.07, 0.2]} material={cream} />
+        <mesh geometry={g.blob} position={[0, 0.07, 0.34]} scale={[0.085, 0.1, 0.085]} material={plain} />
+        {leg(0, -0.06, 0.33, -0.02)}
+        {leg(1, 0.06, 0.33, -0.02)}
+        <group ref={head} position={[0, 0.16, 0.42]}>
+          <mesh geometry={g.blob} scale={[0.1, 0.088, 0.095]} material={plain} castShadow />
+          <mesh geometry={g.blob} position={[0, -0.032, 0.07]} scale={[0.052, 0.036, 0.04]} material={cream} />
+          <mesh geometry={g.blob} position={[0, -0.008, 0.105]} scale={0.014} material={pink} />
+          {[-1, 1].map((s) => <mesh key={`e${s}`} geometry={g.blob} position={[s * 0.04, 0.018, 0.083]} scale={[0.017, 0.02, 0.012]} material={eye} />)}
+          {[-1, 1].map((s) => <mesh key={`r${s}`} geometry={ear} position={[s * 0.056, 0.085, -0.01]} rotation={[0, 0, -s * 0.28]} material={plain} />)}
+          {[-0.025, 0, 0.025].map((x) => <mesh key={`m${x}`} geometry={g.box} position={[x, 0.07, 0.05]} rotation={[-0.6, 0, x * 8]} scale={[0.01, 0.004, 0.04]} material={stripe} />)}
+        </group>
+        <group ref={tail} position={[0, 0.05, -0.07]}>
+          <mesh geometry={seg} position={[0, 0.07, 0]} scale={[1, 0.14, 1]} material={plain} />
+          <mesh geometry={seg} position={[0, 0.18, 0]} scale={[0.9, 0.09, 0.9]} material={stripe} />
+          <group ref={tail2} position={[0, 0.22, 0]} rotation={[-0.5, 0, 0]}>
+            <mesh geometry={seg} position={[0, 0.06, 0]} scale={[0.85, 0.12, 0.85]} material={plain} />
+            <mesh geometry={seg} position={[0, 0.16, 0]} scale={[0.75, 0.09, 0.75]} material={stripe} />
+          </group>
+        </group>
+      </group>
+    </group>
+    <mesh geometry={g.hit} position={[0, 0.28, 0.1]} scale={0.75} material={hitMat()}
+      onClick={(e) => { e.stopPropagation(); onCat(); }}
+      onPointerOver={(e) => { e.stopPropagation(); gl.domElement.style.cursor = 'pointer'; }} onPointerOut={() => { gl.domElement.style.cursor = ''; }} />
+    {bubble > 0 && <Html position={[0, 0.82, 0.1]} center zIndexRange={[7, 0]} style={{ pointerEvents: 'none' }}>
+      <div key={bubble} className="lv3d-meow">เมี้ยว</div>
+    </Html>}
+  </group>;
+}
+
 // ---- Walk mode (first / third person) ------------------------------------------------------------
 // Pure viewing: the player only moves the camera around the line; nothing here writes data.
 type BoardDef = { x: number; z: number; rot: number; w: number; y: number; label: string };
@@ -957,7 +1714,7 @@ const boardEnds = (b: BoardDef) => {
   return { x1: b.x - ax, z1: b.z - az, x2: b.x + ax, z2: b.z + az };
 };
 const SIREN_AT = { x: -2.4, z: -1.6 };
-const EYE = 1.6; const PLAYER_R = 0.35; const BOUND = 32;
+const EYE = 1.6; const PLAYER_R = 0.35; const BOUND = 30.2; // the fence runs at FENCE (just outside)
 // Obstacles as capsules on the floor (a point when a = b): r = radius, h = height the player can jump over.
 type Capsule = { ax: number; az: number; bx: number; bz: number; r: number; h: number };
 function buildColliders(): Capsule[] {
@@ -974,9 +1731,26 @@ function buildColliders(): Capsule[] {
   cap(SIREN_AT.x, SIREN_AT.z, SIREN_AT.x, SIREN_AT.z, 0.32);
   cap(-WALL_SPAN / 2 - 0.3, WALL.z - 0.1, WALL_SPAN / 2 + 0.3, WALL.z - 0.1, 0.4);
   cap(CONSOLE.x - 1.1, CONSOLE.z, CONSOLE.x + 1.1, CONSOLE.z, 0.55);
+  // warehouse walls and posts (front and the front half of the sides are open; AGV door in the right wall)
+  cap(SHED.x0, SHED.z0, SHED.x1, SHED.z0, 0.3);
+  cap(SHED.x0, SHED.z0, SHED.x0, SHED.sideZ, 0.3);
+  cap(SHED.x1, SHED.doorZ1, SHED.x1, SHED.sideZ, 0.3);
+  for (const [x, z] of SHED_POSTS) cap(x, z, x, z, 0.3);
+  // pickup truck, hopper, elevator and chute at the start of the line
+  cap(TRUCK_X - 2.5, 0, TRUCK_X + 2.4, 0, 1.0);
+  cap(HOPPER.x, 0, HOPPER.x, 0, 0.8);
+  cap(HOPPER.x + 0.4, 0, START.x - 0.6, 0, 0.5, 1.3);
+  for (const t of ORCHARD) cap(t.x, t.z, t.x, t.z, 0.55 * t.s);
+  // viewpoint: benches (can be jumped), telescope, railing halves
+  for (const b of BENCHES) cap(b.x - 0.85, b.z, b.x + 0.85, b.z, 0.32, 0.6);
+  cap(VIEW.x - 1.6, VIEW.z - 1.3, VIEW.x - 1.6, VIEW.z - 1.3, 0.25);
+  cap(VIEW.x - 3.4, VIEW.z - 2.1, VIEW.x - 0.8, VIEW.z - 2.1, 0.12, 0.95);
+  cap(VIEW.x + 0.8, VIEW.z - 2.1, VIEW.x + 3.4, VIEW.z - 2.1, 0.12, 0.95);
+  cap(VIEW_SIGN.x, VIEW_SIGN.z, VIEW_SIGN.x, VIEW_SIGN.z, 0.15);
   return out;
 }
 let COLLIDERS: Capsule[] | null = null;
+const allColliders = () => (COLLIDERS ??= buildColliders());
 
 type Person = 'first' | 'third';
 type Warp = { x: number; z: number; yaw: number; pitch?: number; n: number };
@@ -987,6 +1761,8 @@ const WARPS: { key: string; label: string; x: number; z: number; yaw: number; pi
   { key: 'good', label: 'ตะกร้าดี', x: CRATE.good.x - 2.7, z: CRATE.good.z + 0.4, yaw: -Math.PI / 2 + 0.15 },
   { key: 'defect', label: 'ตะกร้าเสีย', x: CRATE.defect.x - 2.4, z: CRATE.defect.z + 0.9, yaw: -Math.PI / 2 + 0.36 },
   { key: 'console', label: 'ห้องควบคุม', x: CONSOLE.x, z: CONSOLE.z + 2.3, yaw: 0 },
+  { key: 'truck', label: 'รถส่งผลไม้', x: -14.4, z: 3.7, yaw: 0.4 },
+  { key: 'view', label: 'จุดชมวิว', x: VIEW.x, z: VIEW.z - 0.9, yaw: 0.05, pitch: 0.02 },
   ...WALL_KEYS.map((key) => { const b = BOARDS[key]; return { key, label: b.label, x: b.x + Math.sin(b.rot) * 4.5, z: b.z + Math.cos(b.rot) * 4.5, yaw: b.rot, pitch: 0.24 }; }),
 ];
 type NearKey = Kind | 'console' | null;
@@ -1011,6 +1787,9 @@ function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; pha
     </group>)}
     <mesh geometry={g.box} position={[0, 1.13, 0]} scale={[0.5, 0.64, 0.28]} material={vest} castShadow />
     <mesh geometry={g.box} position={[0, 1.08, 0]} scale={[0.52, 0.05, 0.3]} material={mat('reflect', () => new THREE.MeshBasicMaterial({ color: '#e8fff4', toneMapped: false }))} />
+    {/* group logo + name "ส้มหยุด" on the vest: chest (front = -z) and back */}
+    <mesh position={[0, 1.26, -0.142]} rotation={[0, Math.PI, 0]} material={badgeMat()}><planeGeometry args={[0.25, 0.25]} /></mesh>
+    <mesh position={[0, 1.26, 0.142]} material={badgeMat()}><planeGeometry args={[0.3, 0.3]} /></mesh>
     {([[armL, -0.33], [armR, 0.33]] as const).map(([r, x]) => <group key={x} ref={r} position={[x, 1.4, 0]}>
       <mesh geometry={g.box} position={[0, -0.28, 0]} scale={[0.13, 0.58, 0.15]} material={vest} castShadow />
       <mesh geometry={g.box} position={[0, -0.6, 0]} scale={[0.11, 0.1, 0.12]} material={skin} />
@@ -1023,7 +1802,7 @@ function Worker({ moving, phase }: { moving: React.MutableRefObject<number>; pha
 
 function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAim }: {
   person: Person; warp: Warp; onMove: (x: number, z: number, yaw: number) => void; onNear: (key: NearKey) => void;
-  onAim: (hit: { pileId?: string; tokenId?: string; console?: boolean }) => void;
+  onAim: (hit: { pileId?: string; tokenId?: string; console?: boolean; cat?: boolean }) => void;
   onInteract: () => void; onTogglePerson: () => void;
 }) {
   const camera = useThree((s) => s.camera);
@@ -1038,7 +1817,7 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
   const cbs = useRef({ onMove, onNear, onInteract, onTogglePerson, onAim });
   cbs.current = { onMove, onNear, onInteract, onTogglePerson, onAim };
   const scene = useThree((st) => st.scene);
-  const colliders = (COLLIDERS ??= buildColliders());
+  const colliders = allColliders();
   useEffect(() => { pos.current.set(warp.x, 0, warp.z); look.current = { yaw: warp.yaw, pitch: warp.pitch ?? -0.05 }; vy.current = 0; }, [warp]);
   useEffect(() => {
     const prev = camera.rotation.order;
@@ -1070,8 +1849,8 @@ function Walker({ person, warp, onMove, onNear, onInteract, onTogglePerson, onAi
       ray.setFromCamera(centre, camera);
       for (const hit of ray.intersectObjects(scene.children, true)) {
         let o: THREE.Object3D | null = hit.object;
-        while (o && !o.userData.pileId && !o.userData.tokenId && !o.userData.console) o = o.parent;
-        if (o) { cbs.current.onAim({ pileId: o.userData.pileId, tokenId: o.userData.tokenId, console: o.userData.console }); return; }
+        while (o && !o.userData.pileId && !o.userData.tokenId && !o.userData.console && !o.userData.cat) o = o.parent;
+        if (o) { cbs.current.onAim({ pileId: o.userData.pileId, tokenId: o.userData.tokenId, console: o.userData.console, cat: o.userData.cat }); return; }
       }
     };
     document.addEventListener('mousedown', shoot);
@@ -1422,10 +2201,14 @@ function useBoardData() {
 }
 
 // Top-down map of the line; the player marker is moved directly (no re-render per frame).
-function MiniMap({ markerRef, alert }: { markerRef: React.MutableRefObject<SVGGElement | null>; alert: Props['alert'] }) {
+function MiniMap({ markerRef, catRef, alert }: { markerRef: React.MutableRefObject<SVGGElement | null>; catRef: React.MutableRefObject<SVGCircleElement | null>; alert: Props['alert'] }) {
   const line = (a: THREE.Vector3, b: THREE.Vector3, cls: string, key: string) => <line key={key} x1={a.x} y1={a.z} x2={b.x} y2={b.z} className={cls} />;
-  return <svg className="lv3d-map" viewBox="-18 -14 36 24" aria-hidden="true">
-    <rect x={-18} y={-14} width={36} height={24} className="bg" />
+  return <svg className="lv3d-map" viewBox="-24 -15 48 32" aria-hidden="true">
+    <rect x={-24} y={-15} width={48} height={32} className="bg" />
+    <rect x={SHED.x0} y={SHED.z0} width={SHED.x1 - SHED.x0} height={SHED.z1 - SHED.z0} className="shed" />
+    {ORCHARD.map((t, i) => <circle key={`o${i}`} cx={t.x} cy={t.z} r={0.7 * t.s} className="tree" />)}
+    <rect x={TRUCK_X - 2.6} y={-0.9} width={5.2} height={1.8} className="truck" />
+    <rect x={VIEW.x - 3.5} y={VIEW.z - 2.2} width={7} height={4.4} className="deck" />
     {line(new THREE.Vector3(START.x - 0.6, 0, 0), new THREE.Vector3(FORK.x + 0.4, 0, 0), 'belt', 'm')}
     {KINDS.map((k) => line(FORK, END[k], `belt ${k}`, k))}
     {KINDS.map((k) => <rect key={`c${k}`} x={CRATE[k].x - 1} y={CRATE[k].z - 0.75} width={2} height={1.5} className={`crate ${k}`} transform={`rotate(${-crateAngle(k) * 180 / Math.PI} ${CRATE[k].x} ${CRATE[k].z})`} />)}
@@ -1434,6 +2217,7 @@ function MiniMap({ markerRef, alert }: { markerRef: React.MutableRefObject<SVGGE
     <rect x={CONSOLE.x - 1.3} y={CONSOLE.z - 0.45} width={2.6} height={0.9} className="console" />
     {alert && <circle cx={SIREN_AT.x} cy={SIREN_AT.z} r={1.6} className={`alert ${alert}`} />}
     {TREES.map((t, i) => <circle key={i} cx={t.x} cy={t.z} r={0.9 * t.s} className="tree" />)}
+    <circle ref={catRef} cx={0} cy={0} r={0.55} className="cat"><title>แมวส้ม</title></circle>
     <g ref={markerRef}><path d="M0 -1.1 L0.75 0.8 L0 0.35 L-0.75 0.8 Z" className="me" /></g>
   </svg>;
 }
@@ -1555,8 +2339,11 @@ export default function LiveScene3D(props: Props) {
   useEffect(() => { if (!toast) return; const id = window.setTimeout(() => setToast(''), 3500); return () => window.clearTimeout(id); }, [toast]);
   const nearRef = useRef(near); nearRef.current = near;
   const [crateOpen, setCrateOpen] = useState<Kind | null>(null);
+  const [meowKey, setMeowKey] = useState(0);
+  const onCat = () => setMeowKey((k) => k + 1);
   const rootRef = useRef<HTMLDivElement>(null);
   const marker = useRef<SVGGElement | null>(null);
+  const catMarker = useRef<SVGCircleElement | null>(null);
   const canvasEl = () => rootRef.current?.querySelector('canvas') ?? null;
   useEffect(() => {
     const on = () => setLocked(!!document.pointerLockElement && document.pointerLockElement === canvasEl());
@@ -1567,24 +2354,22 @@ export default function LiveScene3D(props: Props) {
     try { const r = canvasEl()?.requestPointerLock() as unknown as Promise<void> | undefined; r?.catch?.(() => undefined); } catch { /* not allowed */ }
   };
   const unlockMouse = () => { if (document.pointerLockElement) document.exitPointerLock(); };
-  // Hold Alt in walk mode: free the mouse cursor (e.g. to click a crate), lock again on release
-  const [altHeld, setAltHeld] = useState(false);
-  const lockedRef = useRef(locked); lockedRef.current = locked;
+  // Alt in walk mode is a toggle: press once to free the mouse cursor (e.g. to click a crate), press again to hide it
+  // and lock the pointer again. If the browser refuses the re-lock, the "click to walk" help comes back.
+  const [altFree, setAltFree] = useState(false);
+  useEffect(() => { if (locked) setAltFree(false); }, [locked]);
+  const crateOpenRef = useRef<Kind | null>(null); crateOpenRef.current = crateOpen;
   useEffect(() => {
-    if (!walk) return;
-    let relock = false;
+    if (!walk) { setAltFree(false); return; }
     const down = (e: KeyboardEvent) => {
       if (e.key !== 'Alt') return;
       e.preventDefault();
       if (e.repeat) return;
-      relock = lockedRef.current; setAltHeld(true); unlockMouse();
+      if (document.pointerLockElement && document.pointerLockElement === canvasEl()) { setAltFree(true); unlockMouse(); return; }
+      setAltFree(false);
+      if (!crateOpenRef.current) lockMouse();
     };
-    const up = (e: KeyboardEvent) => {
-      if (e.key !== 'Alt') return;
-      e.preventDefault(); setAltHeld(false);
-      if (relock) lockMouse();
-      relock = false;
-    };
+    const up = (e: KeyboardEvent) => { if (e.key === 'Alt') e.preventDefault(); };
     window.addEventListener('keydown', down); window.addEventListener('keyup', up);
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1606,8 +2391,9 @@ export default function LiveScene3D(props: Props) {
   };
   const pileIndex = useRef(new Map<string, Piled>());
   const onPile = (p: Piled) => setPick({ token: p.token ?? { id: p.id, kind: p.kind, fruit: p.fruit, count: 1, conf: null, defectType: p.defectType, track: null, spawnedAt: 0, seed: true }, landed: true, follow: false });
-  const onAim = (hit: { pileId?: string; tokenId?: string; console?: boolean }) => {
+  const onAim = (hit: { pileId?: string; tokenId?: string; console?: boolean; cat?: boolean }) => {
     if (hit.console) { pressConsole(); return; }
+    if (hit.cat) { onCat(); return; }
     const p = hit.pileId ? pileIndex.current.get(hit.pileId) : undefined;
     if (p) { onPile(p); return; }
     const t = hit.tokenId ? props.tokens.find((x) => x.id === hit.tokenId) : undefined;
@@ -1655,7 +2441,7 @@ export default function LiveScene3D(props: Props) {
     <Canvas className="lv3d-canvas" shadows dpr={[1, q.dpr]} camera={{ position: PRESETS.overview.pos, fov: 36 }} gl={{ antialias: true, powerPreference: 'high-performance' }}
       onPointerMissed={() => { if (!walk) setPick(null); }}>
       <PerformanceMonitor onDecline={decline} flipflops={3} />
-      <Line {...props} boardData={boardData} onConsole={pressConsole} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
+      <Line {...props} meowKey={meowKey} onCat={onCat} catMarker={catMarker} boardData={boardData} onConsole={pressConsole} env={env} q={q} reduced={reduced} pickId={picked} onPick={walk ? () => undefined : onPick} onCrate={(k) => { unlockMouse(); setCrateOpen(k); }} onPile={onPile} pileIndex={pileIndex} registry={registry} />
       {walk
         ? <Walker person={person} warp={warp} onMove={onMove} onNear={setNear} onInteract={interact} onTogglePerson={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))} onAim={onAim} />
         : <>
@@ -1684,16 +2470,18 @@ export default function LiveScene3D(props: Props) {
         <button type="button" onClick={() => setPerson((p) => (p === 'first' ? 'third' : 'first'))}>{person === 'first' ? 'มุมบุคคลที่ 3' : 'มุมบุคคลที่ 1'}</button>
         <button type="button" className="exit" onClick={exitWalk}>ออกจากโหมดเดิน</button>
       </div>
-      <MiniMap markerRef={marker} alert={props.alert} />
+      <MiniMap markerRef={marker} catRef={catMarker} alert={props.alert} />
       {locked && person === 'first' && <div className="lv3d-cross" />}
-      {!locked && !crateOpen && !altHeld && <div className="lv3d-walk-help">
+      {!locked && !crateOpen && altFree && <div className="lv3d-free">เมาส์อิสระ · กด <kbd>Alt</kbd> อีกครั้ง (หรือคลิกที่ฉาก) เพื่อซ่อนเมาส์และเดินต่อ</div>}
+      {!locked && !crateOpen && !altFree && <div className="lv3d-walk-help">
         <b>โหมดเดินสำรวจ</b>
         <button type="button" onClick={lockMouse}>คลิกเพื่อเริ่มเดิน</button>
         <ul>
           <li>คลิกซ้ายที่ผลไม้ (เล็งด้วยกากบาท) ดูข้อมูลลูกนั้น</li>
           <li><kbd>W A S D</kbd> เดิน · <kbd>Shift</kbd> วิ่ง · <kbd>Space</kbd> กระโดด</li>
           <li>เมาส์ หันมอง · <kbd>V</kbd> สลับมุมบุคคลที่ 1 / 3</li>
-          <li><kbd>E</kbd> ดูข้อมูลตะกร้าเมื่ออยู่ใกล้ · กด <kbd>Alt</kbd> ค้างไว้ให้เมาส์โผล่ · <kbd>Esc</kbd> ปล่อยเมาส์</li>
+          <li><kbd>E</kbd> ดูข้อมูลตะกร้าเมื่ออยู่ใกล้ · <kbd>Alt</kbd> สลับเมาส์โผล่ / ซ่อน · <kbd>Esc</kbd> ปล่อยเมาส์</li>
+          <li>เจอแมวส้มเดินเล่นอยู่ คลิก (หรือเล็งกากบาทแล้วคลิก) เพื่อทักทาย</li>
         </ul>
       </div>}
       {near && !crateOpen && <div className="lv3d-prompt">{near === 'console'
