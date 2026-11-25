@@ -119,7 +119,18 @@ foreach ($f in "schema_core.sql","migration_001_names.sql","migration_002.sql","
 
 ### 5. รัน
 
+ทุกอย่างใน Docker (เว็บ, writer, alert_watcher, telegram_bot รวมอยู่ใน `docker-compose.yml`):
+
 ```powershell
+docker compose up -d --build   # ครั้งแรก / หลังแก้โค้ด
+docker compose up -d           # ครั้งต่อไป
+docker compose logs -f writer watcher
+```
+
+หรือรันบนเครื่องตอนพัฒนา (หยุด container ที่ซ้ำกันก่อน):
+
+```powershell
+docker compose stop web writer
 npm run dev        # เว็บ http://localhost:3000 + alert_watcher + telegram_bot
 npm run writer     # อีกหน้าต่าง: MQTT → DB
 ```

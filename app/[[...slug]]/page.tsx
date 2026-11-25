@@ -7,7 +7,7 @@ import {
   Download, FileText, Gauge, History, Info, Leaf, LineChart, LogIn, LogOut, MessageCircle, MoreHorizontal,
   PackageCheck, Pause, Play, Power, Radio, RefreshCcw, Search, Save, Settings2, SlidersHorizontal,
   Sparkles, Square, Tag, Timer, Trash2, TrendingDown, TrendingUp, UserCircle2, Users, Wifi, WifiOff,
-  Zap, CircleDot, Monitor, X, Volume2, VolumeX, PanelLeftClose, PanelLeftOpen,
+  Zap, CircleDot, Monitor, X, Volume2, VolumeX, PanelLeftClose, PanelLeftOpen, Maximize2, Minimize2, Repeat,
 } from 'lucide-react';
 type AuthUser = { id: number; email: string; name: string; role: 'admin' | 'viewer' };
 const AuthContext = createContext<{ user: AuthUser | null; logout: () => void }>({ user: null, logout: () => undefined });
@@ -115,6 +115,7 @@ function Topbar({ status, onOpenMenu, unacked, sound, onToggleSound, collapsed, 
 }
 
 
+const AlertFeedContext = createContext<FeedAlert[]>([]);
 type FeedAlert = { id: number; ts: string | null; rule: string; level: 'info' | 'warning' | 'critical'; device_id: string | null; title: string; detail: string | null; resolved_at: string | null };
 
 // Polls /api/alerts/feed on every page: pop-up toasts, optional sound + desktop notification.
@@ -202,7 +203,7 @@ function Shell({ current, children, mobileOpen, setMobileOpen }: { current: Page
   const shell = useShellStatus(current === 'simulate', current === 'system');
   const status = shell.status;
   const feed = useAlertFeed();
-  return <ShellContext.Provider value={shell}><div className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''}`}><Sidebar current={current} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} status={status} /><div className="main-shell"><Topbar status={status} onOpenMenu={() => setMobileOpen(true)} unacked={feed.unacked} sound={feed.sound} onToggleSound={feed.toggleSound} collapsed={collapsed} onToggleSidebar={toggleSidebar} /><AlertToasts toasts={feed.toasts} dismiss={feed.dismiss} />{children}</div></div></ShellContext.Provider>;
+  return <ShellContext.Provider value={shell}><div className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''}`}><Sidebar current={current} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} status={status} /><div className="main-shell"><Topbar status={status} onOpenMenu={() => setMobileOpen(true)} unacked={feed.unacked} sound={feed.sound} onToggleSound={feed.toggleSound} collapsed={collapsed} onToggleSidebar={toggleSidebar} /><AlertToasts toasts={feed.toasts} dismiss={feed.dismiss} /><AlertFeedContext.Provider value={feed.toasts}>{children}</AlertFeedContext.Provider></div></div></ShellContext.Provider>;
 }
 
 function MetricCard({ label, value, foot, tone, icon }: { label: string; value: string | number; foot?: string; tone?: 'green' | 'orange'; icon?: React.ReactNode }) {
@@ -226,18 +227,25 @@ type LiveData = {
   ingest_latency: { avg_s: number | null; max_s: number | null; n: number };
   batch_config: { size: number; flush_sec: number };
   batches: LiveBatch[];
+  // events written after ?since= (one row per fruit, oldest first); null when since was not sent
+  new_events: LiveEvent[] | null;
+  // 5-second buckets (epoch seconds) of the last 5 minutes
+  spark: { t: number; n: number; defect: number }[];
 };
 // One DB write by mqtt_to_db.py: all its rows share created_at.
 type LiveBatch = { created_at: string | null; n: number; defect: number; first_ts: string | null; last_ts: string | null };
 type LiveHealth = { db: string; mqtt: string; internet: string };
-// One pile per DB batch on the belt. The lead pile carries the whole batch to the fork, then goes on as the
-// good pile; the defect pile appears at the fork. A lead with no good fruit (carrier) fades out there.
-type LiveToken = { id: string; batch: string; label: string; kind: 'good' | 'defect'; lead: boolean; carrier: boolean; count: number; total: number; good: number; defect: number; fruit: string | null };
+// One fruit on the belt (or a bundle of same-result fruit when the line is faster than the belt can show).
+// Each event is replayed at its CORE timestamp + a playback offset, so fruit flow one by one instead of
+// arriving as one pile per DB batch.
+type LiveToken = { id: string; batch: string; kind: 'good' | 'defect'; fruit: string | null; count: number; conf: number | null; defectType: string | null; track: number | null; model: string | null; modelSwitch: { from: string; to: string } | null };
+type LivePending = LiveToken & { at: number };
 
 const liveWindows = [{ v: 5, label: '5 นาที' }, { v: 15, label: '15 นาที' }, { v: 60, label: '1 ชม.' }, { v: 480, label: '8 ชม.' }, { v: 1440, label: '24 ชม.' }];
 const fruitEmoji: Record<string, string> = { orange: '🍊', apple: '🍎', banana: '🍌' };
-const LIVE_QUEUE_MAX = 12;
-const LIVE_SPAWN_GAP_MS = 450; // between two batch piles
+const LIVE_MIN_GAP_MS = 170; // between two fruit on the belt
+const LIVE_BACKLOG_MERGE = 10; // more due fruit than this: bundle them so the belt keeps up
+const LIVE_PLAYBACK_MARGIN_MS = 350;
 const LIVE_TRAVEL_MS = 3400; // must match .lv-token animation-duration in globals.css
 const liveTime = (value: string | null) => value ? new Intl.DateTimeFormat('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value)) : '-';
 const liveTimeTenth = (value: string | null) => {
@@ -249,23 +257,87 @@ const liveConf = (value: number | null) => value == null ? '-' : `${(value <= 1 
 const liveEmoji = (fruit: string | null) => (fruit && fruitEmoji[fruit]) || '🍈';
 const liveKind = (event: LiveEvent): 'good' | 'defect' => event.external_result === 'defect' ? 'defect' : 'good';
 
+const stripAt = ({ at: _at, ...token }: LivePending): LiveToken => token;
+
+// Optional scene sounds (off by default, remembered per browser): a soft blip per good fruit, a low thud per
+// defect, a chime on model switch. Throttled so a busy line does not turn into noise.
+function useLiveSfx() {
+  const [on, setOn] = useState(false);
+  const onRef = useRef(false);
+  const ctx = useRef<AudioContext | null>(null);
+  const last = useRef(0);
+  useEffect(() => {
+    try { const stored = window.localStorage.getItem('cira-live-sfx') === 'true'; setOn(stored); onRef.current = stored; } catch { /* storage blocked */ }
+  }, []);
+  const audio = () => {
+    try {
+      if (!ctx.current) ctx.current = new AudioContext();
+      if (ctx.current.state === 'suspended') void ctx.current.resume();
+      return ctx.current;
+    } catch { return null; }
+  };
+  const toggle = () => {
+    const next = !onRef.current;
+    onRef.current = next; setOn(next);
+    try { window.localStorage.setItem('cira-live-sfx', String(next)); } catch { /* storage blocked */ }
+    if (next) audio();
+  };
+  const play = (kind: 'good' | 'defect' | 'switch') => {
+    if (!onRef.current || document.hidden) return;
+    const now = performance.now();
+    if (kind !== 'switch' && now - last.current < 90) return;
+    last.current = now;
+    const c = audio();
+    if (!c) return;
+    const tones: [number, number][] = kind === 'good' ? [[880, 0.07]] : kind === 'defect' ? [[220, 0.12], [160, 0.12]] : [[523, 0.09], [659, 0.09], [784, 0.16]];
+    let t = c.currentTime;
+    tones.forEach(([freq, dur]) => {
+      const osc = c.createOscillator(); const gain = c.createGain();
+      osc.type = kind === 'defect' ? 'triangle' : 'sine'; osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(kind === 'good' ? 0.06 : 0.12, t + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(gain).connect(c.destination); osc.start(t); osc.stop(t + dur + 0.02);
+      t += dur;
+    });
+  };
+  return { on, toggle, play };
+}
+
 function SimulateView() {
   const [windowMin, setWindowMin] = useState(15);
   const [live, setLive] = useState<LiveData | null>(null);
   const shell = useContext(ShellContext);
   const health: LiveHealth = { db: shell.status.db, mqtt: shell.status.mqtt, internet: shell.status.internet };
   const [error, setError] = useState('');
-  const [queue, setQueue] = useState<LiveToken[]>([]);
   const [tokens, setTokens] = useState<LiveToken[]>([]);
+  // Fruit waiting for their playback time. A ref (not state) so the 80 ms tick does not re-render;
+  // queueVer bumps when it changes so the in-flight counts stay right.
+  const pending = useRef<LivePending[]>([]);
+  const [, setQueueVer] = useState(0);
+  const playbackOffset = useRef<number | null>(null);
+  const [playbackLag, setPlaybackLag] = useState<number | null>(null);
   const [hit, setHit] = useState({ good: 0, defect: 0 });
   const [lastIn, setLastIn] = useState<{ good?: string; defect?: string }>({});
   const [bursts, setBursts] = useState<{ key: string; kind: 'good' | 'defect'; count: number }[]>([]);
+  const [paddleKey, setPaddleKey] = useState(0);
+  const [streak, setStreak] = useState({ now: 0, best: 0 });
+  const [modelBanner, setModelBanner] = useState<{ key: number; from: string; to: string } | null>(null);
+  const lastModel = useRef<string | null>(null);
+  const [winding, setWinding] = useState(false);
+  const [powerKey, setPowerKey] = useState(0);
+  const wasPlaying = useRef<boolean | null>(null);
+  const [tv, setTv] = useState(false);
+  const stageCardRef = useRef<HTMLDivElement | null>(null);
+  const sfx = useLiveSfx();
+  const alertFeed = useContext(AlertFeedContext);
   // created_at (ms) of the newest batch already on screen; null until the first load (no replay of old batches)
   const seenBatch = useRef<number | null>(null);
   // Measured when a new event first reaches this browser: CIRA timestamp -> screen, DB write -> screen.
   const [arrival, setArrival] = useState<{ e2e: number; dbToScreen: number; at: number } | null>(null);
   const lastSpawn = useRef(0);
   const landTimers = useRef<number[]>([]);
+  const later = (ms: number, fn: () => void) => { landTimers.current.push(window.setTimeout(fn, ms)); };
   // Live feed shows one row per DB batch; clicking a row loads that batch's events.
   const [openBatches, setOpenBatches] = useState<Record<string, LiveEvent[] | 'loading' | 'error'>>({});
   const toggleBatch = async (createdAt: string) => {
@@ -289,39 +361,56 @@ function SimulateView() {
   const state = live?.device?.state ?? (live ? 'offline' : null);
   const playing = state === 'playing' || state === 'started';
 
+  // Queue new events for replay: each fruit starts at its CORE timestamp + one playback offset. The offset
+  // is the age of the oldest new fruit (so none is already late) and only shrinks slowly, so the flow stays even.
+  const enqueue = (events: LiveEvent[], received: number) => {
+    const times = events.map((e) => Date.parse(e.ts ?? '')).filter((t) => !Number.isNaN(t));
+    if (!times.length) return;
+    const want = received - Math.min(...times) + LIVE_PLAYBACK_MARGIN_MS;
+    playbackOffset.current = playbackOffset.current == null ? want : Math.max(want, playbackOffset.current - 250);
+    const offset = playbackOffset.current;
+    setPlaybackLag(offset / 1000);
+    const items = events.map((e): LivePending => {
+      const ts = Date.parse(e.ts ?? '');
+      let modelSwitch: LiveToken['modelSwitch'] = null;
+      if (e.model_version) {
+        if (lastModel.current && lastModel.current !== e.model_version) modelSwitch = { from: lastModel.current, to: e.model_version };
+        lastModel.current = e.model_version;
+      }
+      return {
+        id: e.event_id, batch: e.created_at ?? '', kind: liveKind(e), fruit: e.fruit_type, count: 1, conf: e.confidence,
+        defectType: e.defect_type, track: e.track_id, model: e.model_version, modelSwitch,
+        at: Number.isNaN(ts) ? received : ts + offset,
+      };
+    });
+    pending.current = [...pending.current, ...items].sort((a, b) => a.at - b.at);
+    setQueueVer((v) => v + 1);
+  };
+
   useEffect(() => {
     let active = true;
     seenBatch.current = null;
-    setQueue([]); setTokens([]);
+    pending.current = []; setQueueVer((v) => v + 1); setTokens([]);
     const load = async () => {
       try {
-        const response = await fetch(`/api/live?window=${windowMin}`, { cache: 'no-store' });
+        const since = seenBatch.current != null ? `&since=${encodeURIComponent(new Date(seenBatch.current).toISOString())}` : '';
+        const response = await fetch(`/api/live?window=${windowMin}${since}`, { cache: 'no-store' });
         const payload = await response.json() as LiveData & { error?: string };
         if (!response.ok) throw new Error(payload.error || 'โหลดข้อมูล Live ไม่สำเร็จ');
         if (!active) return;
         const nowState = payload.device?.state ?? 'offline';
         const nowPlaying = nowState === 'playing' || nowState === 'started';
         shell.report({ state: nowState, deviceId: payload.device?.device_id ?? null, epm: payload.events_last_minute, model: payload.recent[0]?.model_version ?? null });
-        const batchMs = (b: LiveBatch) => Date.parse(b.created_at ?? '') || 0;
-        if (seenBatch.current !== null && nowPlaying) {
-          const since = seenBatch.current;
-          const fresh = payload.batches.filter((b) => batchMs(b) > since).reverse(); // oldest first
-          if (fresh.length) {
-            const newest = fresh[fresh.length - 1];
-            const received = Date.now();
-            setArrival({ e2e: (received - Date.parse(newest.last_ts ?? '')) / 1000, dbToScreen: (received - batchMs(newest)) / 1000, at: received });
-            const next = fresh.flatMap((b): LiveToken[] => {
-              const batch = b.created_at ?? '';
-              const fruit = payload.recent.find((e) => e.created_at === b.created_at)?.fruit_type ?? null;
-              const good = b.n - b.defect;
-              const base = { batch, label: liveTime(b.created_at), total: b.n, good, defect: b.defect, fruit };
-              const lead: LiveToken = { ...base, id: `${batch}-g`, kind: 'good', lead: true, carrier: good === 0, count: good };
-              return b.defect ? [lead, { ...base, id: `${batch}-d`, kind: 'defect', lead: false, carrier: false, count: b.defect }] : [lead];
-            });
-            setQueue((current) => [...current, ...next].slice(-LIVE_QUEUE_MAX));
-          }
+        const batchMs = (b: { created_at: string | null }) => Date.parse(b.created_at ?? '') || 0;
+        if (seenBatch.current === null) lastModel.current = payload.recent[0]?.model_version ?? null;
+        if (seenBatch.current !== null && nowPlaying && payload.new_events?.length) {
+          const received = Date.now();
+          const newest = payload.new_events.reduce((a, b) => (batchMs(b) > batchMs(a) ? b : a));
+          const newestTs = Math.max(...payload.new_events.map((e) => Date.parse(e.ts ?? '') || 0));
+          setArrival({ e2e: (received - newestTs) / 1000, dbToScreen: (received - batchMs(newest)) / 1000, at: received });
+          enqueue(payload.new_events, received);
         }
-        seenBatch.current = Math.max(seenBatch.current ?? 0, ...payload.batches.map(batchMs));
+        seenBatch.current = Math.max(seenBatch.current ?? 0, ...payload.batches.map(batchMs), ...(payload.new_events ?? []).map(batchMs));
         setLive(payload);
         setError('');
       } catch (loadError) {
@@ -334,39 +423,109 @@ function SimulateView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [windowMin]);
 
-  // Release queued batches onto the belt one batch (lead + defect pile together) at a time.
+  // Power down (belt winds down) / power up (light sweep) when the machine state changes.
+  const loaded = !!live;
   useEffect(() => {
-    if (!playing) { if (queue.length) setQueue([]); return; }
-    if (!queue.length) return;
-    const wait = Math.max(0, LIVE_SPAWN_GAP_MS - (Date.now() - lastSpawn.current));
-    const id = window.setTimeout(() => {
-      lastSpawn.current = Date.now();
-      const group = queue.filter((t) => t.batch === queue[0].batch);
-      setQueue(queue.slice(group.length));
-      setTokens((current) => [...current, ...group]);
-      // Timer (not animationend) so baskets stay correct even if the tab is hidden.
-      group.forEach((token) => landTimers.current.push(window.setTimeout(() => land(token), LIVE_TRAVEL_MS)));
-    }, wait);
-    return () => window.clearTimeout(id);
-  }, [queue, playing]);
+    if (!loaded) return;
+    if (wasPlaying.current === true && !playing) { setWinding(true); later(2600, () => setWinding(false)); }
+    if (wasPlaying.current === false && playing) { setWinding(false); setPowerKey((k) => k + 1); }
+    wasPlaying.current = playing;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, loaded]);
+
+  // Release due fruit onto the belt. When more are due than the belt can show, bundle them (one good + one
+  // defect bundle) so the belt catches up without losing count.
+  useEffect(() => {
+    if (!playing) { if (pending.current.length) { pending.current = []; setQueueVer((v) => v + 1); } return; }
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      const queue = pending.current;
+      if (!queue.length || queue[0].at > now || now - lastSpawn.current < LIVE_MIN_GAP_MS) return;
+      let due = 0;
+      while (due < queue.length && queue[due].at <= now) due++;
+      let out: LiveToken[];
+      if (due > LIVE_BACKLOG_MERGE) {
+        const take = Math.max(2, Math.ceil(due / 6));
+        const group = queue.slice(0, take);
+        pending.current = queue.slice(take);
+        out = (['good', 'defect'] as const).flatMap((kind): LiveToken[] => {
+          const part = group.filter((t) => t.kind === kind);
+          if (!part.length) return [];
+          const fruitCount = new Map<string | null, number>();
+          part.forEach((t) => fruitCount.set(t.fruit, (fruitCount.get(t.fruit) ?? 0) + 1));
+          const fruit = [...fruitCount.entries()].sort((a, b) => b[1] - a[1])[0][0];
+          const first = stripAt(part[part.length - 1]);
+          return [{ ...first, id: `${first.id}-x${part.length}`, fruit, count: part.length, defectType: part.length > 1 ? null : first.defectType, modelSwitch: part.find((t) => t.modelSwitch)?.modelSwitch ?? null }];
+        });
+      } else {
+        out = [stripAt(queue[0])];
+        pending.current = queue.slice(1);
+      }
+      lastSpawn.current = now;
+      setQueueVer((v) => v + 1);
+      setTokens((current) => [...current, ...out]);
+      out.forEach((token) => {
+        if (token.modelSwitch) {
+          const sw = token.modelSwitch;
+          later(LIVE_TRAVEL_MS * 0.25, () => { setModelBanner({ key: Date.now(), ...sw }); sfx.play('switch'); });
+          later(LIVE_TRAVEL_MS * 0.25 + 6000, () => setModelBanner((b) => (b && b.to === sw.to ? null : b)));
+        }
+        if (token.kind === 'defect') later(LIVE_TRAVEL_MS * 0.47, () => setPaddleKey((k) => k + 1));
+        // Timer (not animationend) so baskets stay correct even if the tab is hidden.
+        later(LIVE_TRAVEL_MS, () => land(token));
+      });
+    }, 80);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing]);
 
   const land = (token: LiveToken) => {
     setTokens((current) => current.filter((item) => item.id !== token.id));
-    if (!token.count) return;
     setHit((current) => ({ ...current, [token.kind]: current[token.kind] + token.count }));
-    setLastIn((current) => ({ ...current, [token.kind]: `batch ${token.label}` }));
+    setLastIn((current) => ({ ...current, [token.kind]: `${liveEmoji(token.fruit)} ${token.count > 1 ? `×${token.count}` : `#${token.track ?? '-'}`}` }));
+    setStreak((current) => token.kind === 'good' ? { now: current.now + token.count, best: Math.max(current.best, current.now + token.count) } : { ...current, now: 0 });
+    sfx.play(token.kind);
     const key = `${token.id}-burst`;
     setBursts((current) => [...current.slice(-5), { key, kind: token.kind, count: token.count }]);
-    landTimers.current.push(window.setTimeout(() => setBursts((current) => current.filter((b) => b.key !== key)), 900));
+    later(900, () => setBursts((current) => current.filter((b) => b.key !== key)));
+  };
+
+  // TV mode: the Sorting card fills the screen (true fullscreen when the browser allows it). ?tv=1 opens in it.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('tv') === '1') setTv(true);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setTv(false); };
+    const onFs = () => { if (!document.fullscreenElement) setTv(false); };
+    window.addEventListener('keydown', onKey);
+    document.addEventListener('fullscreenchange', onFs);
+    return () => { window.removeEventListener('keydown', onKey); document.removeEventListener('fullscreenchange', onFs); };
+  }, []);
+  const toggleTv = () => {
+    if (tv) {
+      setTv(false);
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+    } else {
+      setTv(true);
+      void stageCardRef.current?.requestFullscreen?.().catch(() => undefined);
+    }
   };
 
   const totals = live?.totals ?? { total: 0, good: 0, defect: 0 };
-  const inFlight = [...queue, ...tokens];
+  const inFlight: LiveToken[] = [...pending.current, ...tokens];
   const inFlightCount = (kind: 'good' | 'defect') => inFlight.filter((t) => t.kind === kind).reduce((acc, t) => acc + t.count, 0);
   const shown = {
     good: Math.max(0, totals.good - inFlightCount('good')),
     defect: Math.max(0, totals.defect - inFlightCount('defect')),
   };
+  const shownSum = shown.good + shown.defect;
+  const sceneAlert = alertFeed.filter((t) => t.level !== 'info' && !t.resolved_at).slice(-1)[0];
+  const beltDur = `${Math.max(0.35, 1.4 - (live?.events_last_minute ?? 0) / 250).toFixed(2)}s`;
+  const spark = (() => {
+    if (!live) return [];
+    const end = Math.floor(Date.parse(live.now) / 5000) * 5;
+    const map = new Map(live.spark.map((b) => [b.t, b]));
+    return Array.from({ length: 60 }, (_, i) => { const t = end - (59 - i) * 5; const b = map.get(t); return { t, n: b?.n ?? 0, defect: b?.defect ?? 0 }; });
+  })();
+  const sparkMax = Math.max(1, ...spark.map((b) => b.n));
   const defectRate = totals.total ? ((totals.defect / totals.total) * 100).toFixed(1) : '0.0';
   const windowLabel = liveWindows.find((w) => w.v === windowMin)?.label ?? '';
   const tone = (value: string): 'good' | 'bad' | 'neutral' => value === 'online' ? 'good' : value === 'offline' ? 'bad' : 'neutral';
@@ -440,38 +599,86 @@ function SimulateView() {
 
     <div className="live-main">
       <div className="live-left">
-        <div className="card live-stage-card">
-          <div className="live-card-head"><h2>Sorting</h2><span>{!live ? 'กำลังโหลด...' : playing ? (inFlight.length ? `● กำลังคัด ${inFlightCount('good') + inFlightCount('defect')} ผล · ${new Set(inFlight.map((t) => t.batch)).size} batch` : '● รอผลไม้ผ่านกล้อง') : '○ หยุด · ไม่มี heartbeat'}</span></div>
-          <div className={`live-stage ${live && !playing ? 'stopped' : ''}`}>
+        <div ref={stageCardRef} className={`card live-stage-card ${tv ? 'tv' : ''}`}>
+          <div className="live-card-head">
+            <h2>Sorting</h2>
+            <span>{!live ? 'กำลังโหลด...' : playing ? (inFlight.length ? `● กำลังคัด ${inFlightCount('good') + inFlightCount('defect')} ผล` : '● รอผลไม้') : 'เครื่องหยุด'}{playbackLag != null && playing ? ` · ภาพหน่วง ~${playbackLag.toFixed(1)} วิ` : ''}</span>
+            <div className="live-stage-tools">
+              <button type="button" className="lv-tool" title={sfx.on ? 'ปิดเสียงฉาก' : 'เปิดเสียงฉาก'} aria-pressed={sfx.on} onClick={sfx.toggle}>{sfx.on ? <Volume2 size={14} /> : <VolumeX size={14} />}</button>
+              <button type="button" className="lv-tool" title={tv ? 'ออกจากจอใหญ่ (Esc)' : 'โหมดจอใหญ่'} onClick={toggleTv}>{tv ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
+            </div>
+          </div>
+          {tv && <div className="lv-tv-kpis">
+            <div><span>Total · {windowLabel}</span><strong>{totals.total.toLocaleString()}</strong></div>
+            <div className="good"><span>Good</span><strong>{totals.good.toLocaleString()}</strong></div>
+            <div className="bad"><span>Defect</span><strong>{totals.defect.toLocaleString()}</strong></div>
+            <div><span>Defect rate</span><strong>{defectRate}%</strong></div>
+            <div><span>ผล / นาที</span><strong>{live?.events_last_minute ?? 0}</strong></div>
+            <div><span>{live?.device?.device_id ?? '-'}</span><strong className="small">{latest?.model_version ?? '-'}</strong></div>
+          </div>}
+          <div className={`live-stage ${live && !playing ? 'stopped' : ''} ${sceneAlert ? `alerting ${sceneAlert.level}` : ''}`} style={{ ['--belt-dur' as string]: beltDur } as React.CSSProperties}>
             <div className="lv-scene">
               <svg className="lv-belts" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                <polyline className={`lv-belt ${playing ? 'run' : ''}`} points="0,48 46,48 54,43 60,38 70,35.5 80,33 84,30" />
-                <polyline className={`lv-belt bad ${playing ? 'run' : ''}`} points="46,48 51,55 60,60 70,64.5 80,69 87,70" />
+                <polyline className={`lv-belt ${playing ? 'run' : winding ? 'wind' : ''}`} points="0,48 46,48 54,43 60,38 70,35.5 80,33 84,30" />
+                <polyline className={`lv-belt bad ${playing ? 'run' : winding ? 'wind' : ''}`} points="46,48 51,55 60,60 70,64.5 80,69 87,70" />
               </svg>
               <div className={`lv-scan ${playing ? 'on' : ''}`} />
+              <div className={`lv-gate-ring ${playing ? 'on' : ''}`} />
+              <div key={`p${paddleKey}`} className={`lv-paddle ${paddleKey ? 'kick' : ''} ${playing ? 'on' : ''}`}><i /></div>
               <div className="lv-hud lv-hud-live"><i className={playing ? 'on' : ''} />{playing ? 'LIVE' : 'STOP'}<span>{live?.device?.device_id ?? '-'} · {live?.events_last_minute ?? 0} ผล/นาที</span></div>
               <div className="lv-hud lv-hud-cam"><Camera size={12} />AI VISION<span>{latest?.model_version ?? '-'} · {latest?.camera_view ?? '-'}</span></div>
               <div className="lv-hud lv-hud-fork">AI DECISION</div>
+              {streak.now >= 5 && <div key={`s${Math.floor(streak.now / 10)}`} className={`lv-hud lv-streak ${streak.now >= 25 ? 'hot' : ''}`}>ดีติดกัน <b>{streak.now}</b><span>สูงสุด {streak.best}</span></div>}
               {tokens.map((token) => {
-                const pile = Array.from({ length: Math.min(token.lead ? token.total : token.count, 5) }, (_, i) => <span key={i}>{liveEmoji(token.fruit)}</span>);
+                const pile = Array.from({ length: Math.min(token.count, 5) }, (_, i) => <span key={i}>{liveEmoji(token.fruit)}</span>);
+                const verdict = token.kind === 'defect' ? (token.defectType ?? 'เสีย') : 'ดี';
                 return <Fragment key={token.id}>
-                  {token.lead && <div className={`lv-flash ${token.defect ? 'defect' : 'good'}`} />}
-                  <div className={`lv-token pile ${token.kind}`}>
-                    <div className={`lv-pile-body ${token.lead ? (token.carrier ? 'carrier' : 'lead') : 'split'}`}>
-                      {token.lead && <div className="lv-bbox wide"><span>AI · {token.total} ผล</span></div>}
-                      <div className="lv-pile">{pile}</div>
-                      <div className="lv-id">batch {token.label}</div>
-                      {token.lead
-                        ? <div className="lv-result swap"><span className="pre">ดี {token.good} · เสีย {token.defect}</span><span className="post">ดี +{token.good}</span></div>
-                        : <div className="lv-result">เสีย +{token.count}</div>}
-                    </div>
+                  <div className={`lv-flash ${token.kind}`} />
+                  <div className={`lv-token ${token.kind} ${token.count > 1 ? 'bundle' : ''}`}>
+                    <div className="lv-bbox"><span>{token.fruit ?? '?'} {liveConf(token.conf)}</span></div>
+                    <div className="lv-pile">{pile}</div>
+                    <div className="lv-id">{token.count > 1 ? `×${token.count}` : `#${token.track ?? '-'}`}</div>
+                    <div className="lv-result">{verdict}{token.count > 1 ? ` +${token.count}` : ''}</div>
                   </div>
                 </Fragment>;
               })}
-              <div className="lv-hud lv-bin good"><span>ตะกร้าดี</span><strong key={`g${hit.good}`} className={hit.good ? 'pop' : ''}>{shown.good.toLocaleString()}</strong><em>{lastIn.good ? `ล่าสุด ${lastIn.good}` : ' '}</em></div>
-              <div className="lv-hud lv-bin bad"><span>ตะกร้าเสีย</span><strong key={`d${hit.defect}`} className={hit.defect ? 'pop' : ''}>{shown.defect.toLocaleString()}</strong><em>{lastIn.defect ? `ล่าสุด ${lastIn.defect}` : ' '}</em></div>
-              {bursts.map((burst) => <div key={burst.key} className={`lv-burst ${burst.kind}`}><b>+{burst.count}</b><i /></div>)}
-              {live && !playing && <div className="lv-stopped"><Power size={20} /><strong>เครื่องหยุด</strong><span>heartbeat ล่าสุด {live.device?.age_sec == null ? '-' : `${live.device.age_sec} วินาทีที่แล้ว`}</span></div>}
+              <div className="lv-hud lv-bin good">
+                <span>ตะกร้าดี</span><strong key={`g${hit.good}`} className={hit.good ? 'pop' : ''}>{shown.good.toLocaleString()}</strong>
+                <div className="lv-fill" title="สัดส่วนของผลที่ลงตะกร้าแล้วในช่วงนี้"><i style={{ width: `${shownSum ? (shown.good / shownSum) * 100 : 0}%` }} /></div>
+                <em>{lastIn.good ? `ล่าสุด ${lastIn.good}` : ' '}</em>
+              </div>
+              <div className="lv-hud lv-bin bad">
+                <span>ตะกร้าเสีย</span><strong key={`d${hit.defect}`} className={hit.defect ? 'pop' : ''}>{shown.defect.toLocaleString()}</strong>
+                <div className="lv-fill" title="สัดส่วนของผลที่ลงตะกร้าแล้วในช่วงนี้"><i style={{ width: `${shownSum ? (shown.defect / shownSum) * 100 : 0}%` }} /></div>
+                <em>{lastIn.defect ? `ล่าสุด ${lastIn.defect}` : ' '}</em>
+              </div>
+              {bursts.map((burst) => <div key={burst.key} className={`lv-burst ${burst.kind}`}>
+                <b>+{burst.count}</b><i className="ring" />
+                {Array.from({ length: 9 }, (_, i) => <i key={i} className="spark" style={{ ['--a' as string]: `${i * 40 + 10}deg`, ['--d' as string]: `${3 + (i % 3)}cqw` } as React.CSSProperties} />)}
+              </div>)}
+              <div className="lv-hud lv-stats">
+                <div className="lv-gauge" title={`Defect rate ช่วง ${windowLabel}`}>
+                  <svg viewBox="0 0 100 56" aria-hidden="true">
+                    <path d="M8 50 A42 42 0 0 1 92 50" className="track" pathLength={100} />
+                    <path d="M8 50 A42 42 0 0 1 92 50" className={`val ${Number(defectRate) >= 30 ? 'bad' : Number(defectRate) >= 15 ? 'warn' : 'good'}`} pathLength={100} style={{ strokeDasharray: `${Math.min(100, Number(defectRate))} 100` }} />
+                  </svg>
+                  <strong>{defectRate}%</strong><span>defect rate</span>
+                </div>
+                <div className="lv-spark" title="ผลต่อ 5 วินาที · 5 นาทีล่าสุด (เขียว = ดี, ส้ม = เสีย)">
+                  <svg viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true">
+                    {spark.map((b, i) => {
+                      const h = (b.n / sparkMax) * 28; const hd = (b.defect / sparkMax) * 28;
+                      return <g key={b.t}><rect x={i * 2} y={30 - h} width={1.5} height={h - hd} className="g" /><rect x={i * 2} y={30 - hd} width={1.5} height={hd} className="d" /></g>;
+                    })}
+                  </svg>
+                  <span>5 นาทีล่าสุด · {live?.events_last_minute ?? 0} ผล/นาที</span>
+                </div>
+              </div>
+              {modelBanner && <div key={modelBanner.key} className="lv-model-banner"><Repeat size={14} /><span>MODEL SWITCH</span><b>{modelBanner.from}</b><i>→</i><b>{modelBanner.to}</b></div>}
+              {sceneAlert && <div className={`lv-alert-banner ${sceneAlert.level}`}><AlertTriangle size={14} /><b>{sceneAlert.title}</b>{sceneAlert.detail && <span>{sceneAlert.detail}</span>}</div>}
+              {powerKey > 0 && <div key={`pw${powerKey}`} className="lv-powerup" />}
+              {live && !playing && <div className={`lv-power-off ${winding ? 'winding' : ''}`} />}
+              {live && !playing && !winding && <div className="lv-stopped"><Power size={20} /><strong>เครื่องหยุด</strong><span>heartbeat ล่าสุด {live.device?.age_sec == null ? '-' : `${live.device.age_sec} วินาทีที่แล้ว`}</span></div>}
             </div>
           </div>
         </div>

@@ -46,7 +46,8 @@ Schema ปัจจุบันเป็นร่างจาก output ทด�
 ## สถานะปัจจุบัน (2026-11-19)
 
 - Docker: `cira-db` (PostgreSQL 16, host port **`127.0.0.1:15432`** → 5432 ใน container), `cira-mqtt` (`1883`), `cira-adminer` (`8080`)
-- รัน: `npm run dev` = เว็บ + alert_watcher + telegram_bot · `python scripts/mqtt_to_db.py` รันแยก (เปิด mqtt_status.py ให้เอง)
+- รันทั้งหมดใน Docker: `docker compose up -d --build` = db + mqtt + adminer + `cira-web` (3000) + `cira-writer` (mqtt_to_db + mqtt_status) + `cira-watcher` + `cira-bot` · ใน container ใช้ host `db:5432` / `mosquitto:1883` (ตั้งใน compose ทับ `.env.local`)
+- รันบนเครื่อง (dev): `docker compose stop web writer` ก่อน แล้ว `npm run dev` = เว็บ + alert_watcher + telegram_bot · `python scripts/mqtt_to_db.py` รันแยก (เปิด mqtt_status.py ให้เอง)
 - ไม่มี CORE: `python scripts/mqtt_sim.py` (ดู `--help`: rate, defect, สลับโมเดล, payload เสีย, ส่งซ้ำ)
 - Migration ล่าสุด `db/migration_006_auth.sql` (users, user_sessions, alerts.acked_by_user, กฎ model_change / daily_report)
 - Login: ทุก API ต้อง login (`requireUser` ใน `src/lib/auth.ts`) · ครั้งแรกที่ยังไม่มีผู้ใช้ หน้า `/login` ให้สร้าง Admin คนแรก

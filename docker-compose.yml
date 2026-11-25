@@ -34,5 +34,67 @@ services:
       - "127.0.0.1:1883:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+
+  # --- App: `docker compose up -d --build` starts everything below too -------------------
+  # Running `npm run dev` / `python scripts/mqtt_to_db.py` on the host at the same time? Stop the
+  # matching container first (`docker compose stop web writer`) so port 3000 and the MQTT writer
+  # are not doubled. watcher/bot are safe to double: they hold a DB lock and the extra one waits.
+  web:
+    build: .
+    image: cira-web
+    container_name: cira-web
+    restart: unless-stopped
+    env_file: [.env]
+    environment: &app-env
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      BATCH_SIZE: ${BATCH_SIZE:-50}
+      FLUSH_SEC: ${FLUSH_SEC:-1.0}
+      TZ: Asia/Bangkok
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      db: { condition: service_healthy }
+      mosquitto: { condition: service_started }
+
+  writer:
+    build: { context: ., dockerfile: scripts/Dockerfile }
+    image: cira-worker
+    container_name: cira-writer
+    restart: unless-stopped
+    command: ["python", "scripts/mqtt_to_db.py"]
+    env_file: [.env]
+    environment: *app-env
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      db: { condition: service_healthy }
+      mosquitto: { condition: service_started }
+
+  watcher:
+    build: { context: ., dockerfile: scripts/Dockerfile }
+    image: cira-worker
+    container_name: cira-watcher
+    restart: unless-stopped
+    command: ["python", "scripts/alert_watcher.py"]
+    env_file: [.env]
+    environment: *app-env
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      writer: { condition: service_started }
+
+  bot:
+    build: { context: ., dockerfile: scripts/Dockerfile }
+    image: cira-worker
+    container_name: cira-bot
+    restart: unless-stopped
+    command: ["python", "scripts/telegram_bot.py"]
+    env_file: [.env]
+    environment: *app-env
+    depends_on:
+      writer: { condition: service_started }
+
 volumes:
   cira_pgdata:

@@ -1,0 +1,17 @@
+node_modules
+.next
+.git
+.claude
+.env
+.env.*
+logs
+*.log
+*.npj
+*.png
+*.jpg
+!public/**
+DOC
+submission
+db
+mosquitto
+tsconfig.tsbuildinfo
