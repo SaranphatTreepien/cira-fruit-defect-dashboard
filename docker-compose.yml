@@ -96,5 +96,16 @@ services:
     depends_on:
       writer: { condition: service_started }
 
+  # Public link for friends / testers (Cloudflare quick tunnel, no account needed). Everyone with the
+  # link reaches the web app; the login page demo account is admin. The trycloudflare.com address is
+  # new each time this container starts: `npm run tunnel:url` prints the current one.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cira-tunnel
+    restart: unless-stopped
+    command: ["tunnel", "--no-autoupdate", "--url", "http://web:3000"]
+    depends_on:
+      web: { condition: service_started }
+
 volumes:
   cira_pgdata:

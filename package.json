@@ -14,6 +14,7 @@
     "bot": "python scripts/telegram_bot.py",
     "writer": "python scripts/mqtt_to_db.py",
     "sim": "python scripts/mqtt_sim.py",
+    "tunnel:url": "node scripts/tunnel_url.mjs",
     "failure-test": "python scripts/failure_test.py"
   },
   "dependencies": {

@@ -48,6 +48,7 @@ Schema ปัจจุบันเป็นร่างจาก output ทด�
 
 - Docker: `cira-db` (PostgreSQL 16, host port **`127.0.0.1:15432`** → 5432 ใน container), `cira-mqtt` (`1883`), `cira-adminer` (`8080`)
 - รันทั้งหมดใน Docker: `docker compose up -d --build` = db + mqtt + adminer + `cira-web` (3000) + `cira-writer` (mqtt_to_db + mqtt_status) + `cira-watcher` + `cira-bot` · ใน container ใช้ host `db:5432` / `mosquitto:1883` (ตั้งใน compose ทับ `.env.local`)
+- ลิงก์สาธารณะ: service `tunnel` (`cira-tunnel`, Cloudflare quick tunnel ไป `web:3000`) รันพร้อม compose · ลิงก์ trycloudflare.com เปลี่ยนทุกครั้งที่ container เริ่มใหม่ ดูลิงก์ปัจจุบันด้วย `npm run tunnel:url` · คนที่มีลิงก์เข้า demo admin ได้ (ตั้งใจให้เพื่อนทดสอบ) · ปิดด้วย `docker compose stop tunnel`
 - รันบนเครื่อง (dev): `docker compose stop web writer` ก่อน แล้ว `npm run dev` = เว็บ + alert_watcher + telegram_bot · `python scripts/mqtt_to_db.py` รันแยก (เปิด mqtt_status.py ให้เอง)
 - ไม่มี CORE: `python scripts/mqtt_sim.py` (ดู `--help`: rate, defect, สลับโมเดล, payload เสีย, ส่งซ้ำ, `--scenario demo` กะจำลอง ~5 นาที)
 - Live scene: 2D (ภาพ + CSS) หรือ 3D (`src/components/LiveScene3D.tsx`, three.js โหลดเฉพาะตอนใช้) · ผลไม้เล่นซ้ำทีละลูกตาม `ts` ของ CORE จาก `/api/live?since=`
