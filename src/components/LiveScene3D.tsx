@@ -969,7 +969,7 @@ function Line({ tokens, travelMs, playing, paddleKey, modelKey, powerKey, alert,
     {TEAM.map((m, i) => <TeamMember key={m.letter} m={m} i={i} talking={fun.talk === i} onTeam={fun.onTeam} />)}
     <EmergencyPanel active={fun.emerg} onPress={fun.onEmerg} />
     {emDef && <EmergencyBeacons color={emDef.color} reduced={reduced} withLight={q.waveLight} />}
-    {fun.emerg === 'fire' && <Fire reduced={reduced} />}
+    {fun.emerg === 'fire' && <Fire reduced={reduced} lite={q === QUALITY.low} />}
     {fun.emerg === 'jam' && <JamWarning reduced={reduced} />}
 
     <Belt from={new THREE.Vector3(START.x - 0.6, 0, 0)} to={new THREE.Vector3(FORK.x + 0.4, 0, 0)} width={1.4} strip={mats.green} speed={speed} trim={[{ side: -1, end: 0.55 }, { side: 1, end: 0.55 }]} />
@@ -1945,7 +1945,7 @@ function TeamCard({ i, onClose }: { i: number; onClose: () => void }) {
 // Nothing here sends a command or writes data; counts and the replay keep running as usual.
 type Emerg = 'fire' | 'power' | 'jam' | 'camera' | 'estop';
 const EMERG: Record<Emerg, { label: string; color: string; level: 'warning' | 'critical'; desc: string }> = {
-  fire: { label: 'ไฟไหม้', color: '#ff3b2f', level: 'critical', desc: 'เปลวไฟที่มุมโกดัง สายพานหยุดทันที ผลไม้ค้างบนไลน์' },
+  fire: { label: 'ไฟไหม้', color: '#ff3b2f', level: 'critical', desc: 'เปลวไฟมุมโกดัง สายพานหยุดทันที · 4 วิ สปริงเกอร์บนเพดานฉีดละอองน้ำจนไฟดับ' },
   power: { label: 'ไฟดับ', color: '#ffd21f', level: 'warning', desc: 'ไฟดับ สายพานค่อยๆ หยุด เหลือไฟฉุกเฉินสีเหลือง' },
   jam: { label: 'สายพานติด', color: '#ff9b2f', level: 'warning', desc: 'สายพานหลักหยุด ผลไม้ต่อแถวหน้าประตูสแกน ที่ผ่านไปแล้ววิ่งต่อ' },
   camera: { label: 'กล้องขัดข้อง', color: '#4f8dff', level: 'warning', desc: 'กล้องไฟแดง สายพานช้า ผลไม้รอสแกนในประตู' },
@@ -2017,33 +2017,95 @@ function EmergencyBeacons({ color, reduced, withLight }: { color: string; reduce
   </>;
 }
 
-function Fire({ reduced }: { reduced: boolean }) {
+// Fire drill timeline (seconds after the drill starts): fire burns, the ceiling sprinklers open at FIRE_T.spray,
+// the flames shrink until FIRE_T.out, then white steam is left until the mist stops at FIRE_T.dry.
+const FIRE_T = { spray: 4, out: 18, dry: 26 };
+const SPRINKLER_Y = 8.6; // pipe under the roof trusses
+const SPRINKLER_HEADS: [number, number][] = [[-0.9, -0.8], [0.9, -0.8], [-0.9, 0.8], [0.9, 0.8]]; // around FIRE_AT
+function Fire({ reduced, lite }: { reduced: boolean; lite: boolean }) {
   const flames = useRef<(THREE.Mesh | null)[]>([]); const smoke = useRef<(THREE.Mesh | null)[]>([]);
   const light = useRef<THREE.PointLight>(null);
+  const drops = useRef<THREE.InstancedMesh>(null);
+  const mist = useRef<(THREE.Mesh | null)[]>([]);
+  const born = useRef(performance.now());
   const cone = useMemo(() => new THREE.ConeGeometry(0.3, 1, 8, 1, true).translate(0, 0.5, 0), []);
   const hot = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ff7a1a', transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, side: THREE.DoubleSide }), []);
   const core = useMemo(() => new THREE.MeshBasicMaterial({ color: '#ffd84a', transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, side: THREE.DoubleSide }), []);
   const puffs = useMemo(() => Array.from({ length: 7 }, () => new THREE.MeshBasicMaterial({ color: '#3d3a36', transparent: true, opacity: 0, depthWrite: false })), []);
-  useEffect(() => () => { cone.dispose(); hot.dispose(); core.dispose(); puffs.forEach((m) => m.dispose()); }, [cone, hot, core, puffs]);
+  const water = useMemo(() => new THREE.MeshBasicMaterial({ color: '#bfe6ff', transparent: true, opacity: 0, depthWrite: false, toneMapped: false }), []);
+  const fogs = useMemo(() => Array.from({ length: 6 }, () => new THREE.MeshBasicMaterial({ color: '#e6f4ff', transparent: true, opacity: 0, depthWrite: false })), []);
+  useEffect(() => () => { cone.dispose(); hot.dispose(); core.dispose(); water.dispose(); puffs.forEach((m) => m.dispose()); fogs.forEach((m) => m.dispose()); }, [cone, hot, core, water, puffs, fogs]);
+  // each drop: which head, angle and spread of its fall path, start phase
+  const N = lite ? 60 : 140;
+  const seeds = useMemo(() => Array.from({ length: N }, (_, i) => ({ head: i % SPRINKLER_HEADS.length, a: hash(`da${i}`) * Math.PI * 2, r: 0.3 + hash(`dr${i}`) * 1.4, ph: hash(`dp${i}`) })), [N]);
+  const o = useMemo(() => new THREE.Object3D(), []);
+  const smokeCol = useMemo(() => ({ dark: new THREE.Color('#3d3a36'), steam: new THREE.Color('#e8eef0') }), []);
   useFrame(({ clock }) => {
     const t = clock.elapsedTime;
-    flames.current.forEach((f, i) => { if (f) f.scale.set(1, (i < 3 ? 1.3 : 0.8) * (reduced ? 1 : 0.8 + 0.35 * Math.abs(Math.sin(t * (9 + i * 2.3) + i))), 1); });
+    const s = (performance.now() - born.current) / 1000;
+    const spray = clamp01((s - FIRE_T.spray) / 0.8) * (1 - clamp01((s - FIRE_T.dry) / 2)); // sprinklers on / off
+    const fire = 1 - clamp01((s - FIRE_T.spray) / (FIRE_T.out - FIRE_T.spray)); // 1 = full fire, 0 = out
+    flames.current.forEach((f, i) => {
+      if (!f) return;
+      const flick = reduced ? 1 : 0.8 + 0.35 * Math.abs(Math.sin(t * (9 + i * 2.3) + i));
+      f.visible = fire > 0.02;
+      f.scale.set((i < 3 ? 1 : 0.8) * (0.4 + 0.6 * fire), (i < 3 ? 1.3 : 0.8) * flick * fire, (i < 3 ? 1 : 0.8) * (0.4 + 0.6 * fire));
+    });
+    // smoke turns into white steam once the water hits the fire
     smoke.current.forEach((p, i) => {
       if (!p) return;
       const k = (t * 0.25 + i / puffs.length) % 1;
       p.position.set(Math.sin(i * 2 + t * 0.6) * 0.4 * k, 1.2 + k * 5, Math.cos(i * 1.3) * 0.3 * k);
       p.scale.setScalar(0.4 + k * 1.6);
-      puffs[i].opacity = Math.sin(k * Math.PI) * 0.55;
+      const steam = clamp01((s - FIRE_T.spray) / 4);
+      puffs[i].color.copy(smokeCol.dark).lerp(smokeCol.steam, steam);
+      puffs[i].opacity = Math.sin(k * Math.PI) * 0.55 * Math.max(fire, steam * (1 - clamp01((s - FIRE_T.out) / 8)));
     });
-    if (light.current) light.current.intensity = 14 + (reduced ? 0 : 6 * Math.sin(t * 17) * Math.sin(t * 7.3));
+    if (light.current) light.current.intensity = (14 + (reduced ? 0 : 6 * Math.sin(t * 17) * Math.sin(t * 7.3))) * fire;
+    // falling water: each drop leaves a head and falls in a widening cone, then starts again
+    water.opacity = 0.7 * spray;
+    const m = drops.current;
+    if (m) {
+      m.visible = spray > 0.01;
+      seeds.forEach((d, i) => {
+        const [hx, hz] = SPRINKLER_HEADS[d.head];
+        const k = reduced ? d.ph : (t * 0.9 + d.ph) % 1; // 0 at the head, 1 at the floor
+        const y = SPRINKLER_Y - 0.25 - k * (SPRINKLER_Y - 0.3);
+        const spread = d.r * Math.sqrt(k);
+        o.position.set(hx + Math.cos(d.a) * spread, y, hz + Math.sin(d.a) * spread);
+        o.scale.set(0.025, 0.28, 0.025); o.rotation.set(0, 0, 0); o.updateMatrix();
+        m.setMatrixAt(i, o.matrix);
+      });
+      m.instanceMatrix.needsUpdate = true;
+    }
+    // mist drifting near the floor
+    mist.current.forEach((p, i) => {
+      if (!p) return;
+      const a = i * 1.05 + t * 0.15;
+      p.position.set(Math.cos(a) * (1 + i * 0.25), 0.6 + (i % 3) * 0.5, Math.sin(a) * (1 + i * 0.25));
+      p.scale.setScalar(1.1 + (i % 2) * 0.5);
+      fogs[i].opacity = 0.16 * spray;
+    });
   });
   const g = geo();
+  const pipe = std('#b2342b', { roughness: 0.5, metalness: 0.3 });
   return <group position={[FIRE_AT.x, 0, FIRE_AT.z]}>
     <mesh geometry={g.box} position={[0, 0.15, 0]} scale={[1.2, 0.3, 1.0]} material={std('#2a1d14', { roughness: 1 })} />
     {[[0, 0, 1], [0.3, 0.15, 0.8], [-0.3, -0.1, 0.85], [0.15, -0.3, 0.6], [-0.2, 0.3, 0.6]].map(([x, z, s], i) => <mesh key={i} ref={(el) => { flames.current[i] = el; }}
       geometry={cone} position={[x, 0.3, z]} scale={[s, 1, s]} material={i < 3 ? hot : core} />)}
     {puffs.map((m, i) => <mesh key={`s${i}`} ref={(el) => { smoke.current[i] = el; }} geometry={g.blob} material={m} />)}
     <pointLight ref={light} position={[0, 1.4, 0]} distance={10} color="#ff7a2a" intensity={14} />
+    {/* sprinkler pipe (red, like fire mains) with four heads above the fire */}
+    <mesh geometry={g.box} position={[0, SPRINKLER_Y, -0.8]} scale={[2.4, 0.08, 0.08]} material={pipe} />
+    <mesh geometry={g.box} position={[0, SPRINKLER_Y, 0.8]} scale={[2.4, 0.08, 0.08]} material={pipe} />
+    <mesh geometry={g.box} position={[0, SPRINKLER_Y + 0.6, 0]} scale={[0.1, 1.2, 0.1]} material={pipe} />
+    <mesh geometry={g.box} position={[0, SPRINKLER_Y, 0]} scale={[0.08, 0.08, 1.7]} material={pipe} />
+    {SPRINKLER_HEADS.map(([x, z]) => <group key={`${x}${z}`} position={[x, SPRINKLER_Y - 0.1, z]}>
+      <mesh geometry={g.box} scale={[0.05, 0.14, 0.05]} material={std('#c9a24a', { metalness: 0.7, roughness: 0.3 })} />
+      <mesh position={[0, -0.09, 0]} material={std('#c9a24a', { metalness: 0.7, roughness: 0.3 })}><cylinderGeometry args={[0.07, 0.07, 0.015, 10]} /></mesh>
+    </group>)}
+    <instancedMesh ref={drops} args={[g.box, water, N]} frustumCulled={false} visible={false} />
+    {fogs.map((m, i) => <mesh key={`m${i}`} ref={(el) => { mist.current[i] = el; }} geometry={g.blob} material={m} />)}
   </group>;
 }
 
