@@ -18,10 +18,11 @@ CIRA CORE (จริง) / scripts/mqtt_sim.py ─MQTT cira/fruit/events + cira/
 
 ## ข้อจำกัดของ CIRA CORE (ยืนยันจากการทดสอบ)
 
-- CIRA CORE เป็น node-based: Start/Stop, เปลี่ยนโมเดล, threshold, ความเร็ว, กล้อง **ต้องทำใน CIRA CORE เอง** เว็บสั่งไม่ได้
+- CIRA CORE เป็น node-based: Start/Stop, เปลี่ยนโมเดล, threshold, ความเร็ว, เปิด/ปิดกล้อง (สวิตช์บน node) **ต้องทำใน CIRA CORE เอง** · ไม่มี API/ROS service ให้สั่งจากภายนอก (ตรวจแล้ว 2026-11-25)
 - เว็บทำได้แค่ **รับค่าและดักสถานะ**: event ผลไม้ + heartbeat สถานะเครื่อง ผ่าน MQTT
+- ข้อยกเว้นเดียว: **หยุด/ทำงานต่อจากเว็บ** (admin, หน้า Live) ผ่าน gate ในกล่อง Python ของ flow — `device_commands` + `/api/core/command` (GET เปิดให้ CORE อ่าน, POST admin) · flow `Demo_Detect_Orange_webcontrol.npj`: ตอนหยุด heartbeat = `paused`, ไม่ส่ง event, กล่อง web gate ค้างวง AutoRun (ประมวลผล ~1 เฟรม/2 วิ) · ไม่ได้กดสวิตช์กล้องใน CORE และ VideoFile ยังเดินตามเวลา (ภาพกระโดดข้ามช่วงที่หยุด)
 - เขียนโค้ดอิสระได้เฉพาะในกล่อง `Python` ของ flow (ใช้สร้าง payload) · field ที่ CORE สร้างไม่ได้ให้ adapter ฝั่งเรา (`mqtt_to_db.py`) เติม
-- อย่าสร้างหน้า/ปุ่มที่ทำเหมือนควบคุมหรือตั้งค่า CORE ได้
+- นอกจาก หยุด/ทำงานต่อ ข้างบน อย่าสร้างหน้า/ปุ่มที่ทำเหมือนควบคุมหรือตั้งค่า CORE ได้
 
 ## ขอบเขต Dashboard
 
@@ -50,7 +51,7 @@ Schema ปัจจุบันเป็นร่างจาก output ทด�
 - รันบนเครื่อง (dev): `docker compose stop web writer` ก่อน แล้ว `npm run dev` = เว็บ + alert_watcher + telegram_bot · `python scripts/mqtt_to_db.py` รันแยก (เปิด mqtt_status.py ให้เอง)
 - ไม่มี CORE: `python scripts/mqtt_sim.py` (ดู `--help`: rate, defect, สลับโมเดล, payload เสีย, ส่งซ้ำ, `--scenario demo` กะจำลอง ~5 นาที)
 - Live scene: 2D (ภาพ + CSS) หรือ 3D (`src/components/LiveScene3D.tsx`, three.js โหลดเฉพาะตอนใช้) · ผลไม้เล่นซ้ำทีละลูกตาม `ts` ของ CORE จาก `/api/live?since=`
-- Migration ล่าสุด `db/migration_006_auth.sql` (users, user_sessions, alerts.acked_by_user, กฎ model_change / daily_report)
+- Migration ล่าสุด `db/migration_007_device_command.sql` (ตาราง device_commands) · ก่อนหน้า `db/migration_006_auth.sql` (users, user_sessions, alerts.acked_by_user, กฎ model_change / daily_report)
 - Login: ทุก API ต้อง login (`requireUser` ใน `src/lib/auth.ts`) · ครั้งแรกที่ยังไม่มีผู้ใช้ หน้า `/login` ให้สร้าง Admin คนแรก
 - ทดสอบความทนทาน: `python scripts/failure_test.py --yes` + `DOC/failure-test-checklist.md`
 - ยังไม่ทำ: Quick Model, ยืนยัน JSON contract กับทีม C, sync/PROD (พักไว้), LINE

@@ -686,3 +686,8 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
 .lv3d-tag.good { background: #1fae62; box-shadow: 0 0 12px rgba(31,174,98,.7); }
 .lv3d-tag.defect { background: #ef7d2d; box-shadow: 0 0 12px rgba(239,125,45,.7); }
 @keyframes lvBannerIn3d { from { opacity: 0; transform: translateY(4px) scale(.85); } to { opacity: 1; transform: translateY(-4px); } }
+
+/* Run / pause gate for a CIRA CORE device (Live header, admin) */
+.core-cmd { display: flex; align-items: center; gap: 8px; }
+.core-cmd em, .core-cmd-note { font-style: normal; font-size: 11px; color: #9a5b12; }
+.core-cmd em.err { color: #c0392b; }

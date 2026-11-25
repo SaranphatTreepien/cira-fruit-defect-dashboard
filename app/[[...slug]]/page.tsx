@@ -311,6 +311,51 @@ function useLiveSfx() {
   return { on, toggle, play };
 }
 
+// Run / pause gate for a CIRA CORE device (admin). It does not press CORE's own Start/Stop: the flow's
+// Python box polls /api/core/command and, while paused, sends no fruit events and reports state "paused".
+function CoreCommand({ deviceId, state }: { deviceId: string; state: string | null }) {
+  const { user } = useAuth();
+  const [cmd, setCmd] = useState<{ run: boolean; updated_by: string | null; updated_at: string | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const r = await fetch(`/api/core/command?device_id=${encodeURIComponent(deviceId)}`, { cache: 'no-store' });
+        const j = await r.json() as { run: boolean; updated_by: string | null; updated_at: string | null };
+        if (active && r.ok) setCmd(j);
+      } catch { /* shown as unknown */ }
+    };
+    void load();
+    const id = window.setInterval(() => { if (!document.hidden) void load(); }, 5000);
+    return () => { active = false; window.clearInterval(id); };
+  }, [deviceId]);
+  const send = async (run: boolean) => {
+    const question = run ? `สั่งให้ ${deviceId} ทำงานต่อ?` : `หยุด ${deviceId} จากเว็บ?
+flow ใน CIRA CORE จะหยุดส่งผลไม้ (กล้อง/AI ใน CORE ยังเปิดอยู่)`;
+    if (!window.confirm(question)) return;
+    setBusy(true); setErr('');
+    try {
+      const r = await fetch('/api/core/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ device_id: deviceId, run }) });
+      const j = await r.json() as { error?: string };
+      if (!r.ok) throw new Error(j.error || 'สั่งไม่สำเร็จ');
+      setCmd({ run, updated_by: user?.name ?? null, updated_at: new Date().toISOString() });
+    } catch (e) { setErr(e instanceof Error ? e.message : 'สั่งไม่สำเร็จ'); } finally { setBusy(false); }
+  };
+  const paused = cmd ? !cmd.run : false;
+  const waiting = cmd && (paused ? state !== 'paused' : state === 'paused');
+  const title = cmd?.updated_at ? `สั่งล่าสุด${cmd.updated_by ? ` โดย ${cmd.updated_by}` : ''} ${liveTime(cmd.updated_at)}` : 'ยังไม่เคยสั่งจากเว็บ';
+  if (user?.role !== 'admin') return paused ? <span className="core-cmd-note" title={title}>หยุดจากเว็บ</span> : null;
+  return <div className="core-cmd" title={title}>
+    <button type="button" className={`btn btn-sm ${paused ? 'btn-primary' : 'btn-danger'}`} disabled={busy || !cmd} onClick={() => void send(paused)}>
+      {paused ? <><Play size={13} /> สั่งทำงานต่อ</> : <><Pause size={13} /> สั่งหยุดจากเว็บ</>}
+    </button>
+    {waiting && <em>รอ CORE รับคำสั่ง...</em>}
+    {err && <em className="err">{err}</em>}
+  </div>;
+}
+
 function SimulateView() {
   const [windowMin, setWindowMin] = useState(15);
   const [live, setLive] = useState<LiveData | null>(null);
@@ -594,7 +639,8 @@ function SimulateView() {
     <div className="card live-head">
       <div className="live-head-title"><h1>Live</h1><span>ข้อมูลจริงจาก DB · อัปเดตทุก 2 วินาที</span></div>
       <div className="live-head-machine">
-        <StatusPill tone={!live ? 'neutral' : playing ? 'good' : 'bad'}>{!live ? 'กำลังโหลด...' : playing ? (state === 'started' ? 'เริ่มทำงาน' : 'กำลังทำงาน') : 'เครื่องหยุด'}</StatusPill>
+        <StatusPill tone={!live ? 'neutral' : playing ? 'good' : state === 'paused' ? 'warn' : 'bad'}>{!live ? 'กำลังโหลด...' : playing ? (state === 'started' ? 'เริ่มทำงาน' : 'กำลังทำงาน') : state === 'paused' ? 'หยุดจากเว็บ' : 'เครื่องหยุด'}</StatusPill>
+        {live?.device?.device_id && <CoreCommand deviceId={live.device.device_id} state={state} />}
         <div><strong>{live?.device?.device_id ?? 'ไม่พบอุปกรณ์'}</strong><span>{live?.device?.source_type ?? '-'} · heartbeat {live?.device?.age_sec == null ? '-' : `${live.device.age_sec} วิ`}</span></div>
         <div><strong>{live?.last_event_at ? liveTime(live.last_event_at) : '-'}</strong><span>event ล่าสุด{lastEventAgo != null ? ` · ${lastEventAgo} วิที่แล้ว` : ''}</span></div>
       </div>

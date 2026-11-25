@@ -439,7 +439,7 @@ export default function LiveScene3D(props: Props) {
   return <Canvas className="lv3d-canvas" shadows dpr={[1, 1.75]} camera={{ position: [0.5, 7.4, 12.6], fov: 36 }} gl={{ antialias: true, powerPreference: 'high-performance' }}>
     <Line {...props} />
     <OrbitControls target={[0.3, 0.4, 0.4]} enablePan={false} enableZoom={props.tv} enableDamping minDistance={8} maxDistance={26}
-      minPolarAngle={0.35} maxPolarAngle={1.25} autoRotate={props.tv && !reduced} autoRotateSpeed={0.35} />
+      minPolarAngle={0.35} maxPolarAngle={1.25} />
     {!reduced && <EffectComposer>
       <Bloom mipmapBlur luminanceThreshold={0.85} luminanceSmoothing={0.2} intensity={props.tv ? 1.1 : 0.7} />
       <Vignette eskil={false} offset={0.25} darkness={props.tv ? 0.7 : 0.35} />
