@@ -566,3 +566,268 @@ input[type='range'] { width: 100%; accent-color: var(--leaf); height: 4px; }
   .app-shell.sidebar-collapsed .nav-item:hover { transform: none; }
 }
 .rule-list.readonly { pointer-events: none; opacity: .72; }
+
+/* ---------- Live scene v2: per-fruit replay, gate, diverter, HUD, TV mode ---------- */
+.live-stage-card .live-card-head { justify-content: flex-start; align-items: center; }
+.live-stage-card .live-card-head > span { margin-left: 10px; }
+.live-stage-tools { margin-left: auto; display: flex; gap: 6px; }
+.lv-tool { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; border: 1px solid var(--line); background: #fff; color: #4f6459; cursor: pointer; transition: background .2s, color .2s; }
+.lv-tool:hover { background: #eef6f1; }
+.lv-tool[aria-pressed="true"] { background: #e6f6ec; color: #1a7f47; border-color: #bfe3cc; }
+
+.lv-belt.run { animation-duration: var(--belt-dur, .8s); }
+.lv-belt.wind { opacity: .85; animation: lvBelt 2.4s cubic-bezier(.1, .7, .3, 1) 1 forwards; }
+
+.lv-gate-ring { position: absolute; left: 24.3%; top: 47.5%; width: 8%; height: 3.2%; border: 2px solid rgba(51,240,208,.85); border-radius: 50%; transform: translate(-50%, -50%) scale(.6); opacity: 0; pointer-events: none; z-index: 2; }
+.lv-gate-ring.on { animation: lvGate 1.6s ease-out infinite; }
+@keyframes lvGate { 0% { opacity: .9; transform: translate(-50%, -50%) scale(.5); } 100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); } }
+
+/* Diverter paddle at the fork: swings toward the defect belt when a defect fruit reaches it */
+.lv-paddle { position: absolute; left: 45.6%; top: 48%; width: 6.5%; height: 1cqw; min-height: 6px; transform-origin: 0 50%; transform: translateY(-50%) rotate(-16deg); z-index: 2; pointer-events: none; opacity: .55; transition: opacity .4s; }
+.lv-paddle.on { opacity: .9; }
+.lv-paddle i { display: block; width: 100%; height: 100%; border-radius: 1cqw; background: linear-gradient(90deg, #f2fffa, #7fe8c8); box-shadow: 0 0 .8cqw rgba(51,240,208,.7); }
+.lv-paddle.kick { animation: lvKick .85s ease-in-out; }
+.lv-paddle.kick i { animation: lvKickColor .85s ease-in-out; }
+@keyframes lvKick { 0% { transform: translateY(-50%) rotate(-16deg); } 22%, 62% { transform: translateY(-50%) rotate(30deg); } 100% { transform: translateY(-50%) rotate(-16deg); } }
+@keyframes lvKickColor { 0%, 100% { background: linear-gradient(90deg, #f2fffa, #7fe8c8); } 22%, 62% { background: linear-gradient(90deg, #fff4e8, #ffa24d); box-shadow: 0 0 1.2cqw rgba(255,150,60,.9); } }
+
+/* Tokens: one fruit (or a bundle) each */
+.lv-token .lv-bbox { left: 50%; margin-left: -2.3cqw; }
+.lv-token.bundle .lv-bbox { width: 7cqw; margin-left: -3.5cqw; }
+.lv-token .lv-pile { font-size: 2.8cqw; }
+.lv-token.bundle .lv-pile { font-size: 2.2cqw; }
+.lv-token .lv-id { white-space: nowrap; }
+
+.lv-streak { left: 1.2%; top: 11%; gap: .4cqw; color: #1a7f47; animation: lvPop .4s ease-out; }
+.lv-streak b { font-size: max(13px, 1.3cqw); }
+.lv-streak.hot { background: linear-gradient(90deg, #fffbe6, #e9fff1); border-color: #ffd86b; box-shadow: 0 0 1.4cqw rgba(255,200,60,.6); }
+
+.lv-fill { width: 100%; height: .45cqw; min-height: 4px; margin: .25cqw 0 .1cqw; border-radius: 1cqw; background: rgba(16,53,42,.1); overflow: hidden; }
+.lv-fill i { display: block; height: 100%; border-radius: inherit; transition: width .6s ease-out; }
+.lv-bin.good .lv-fill i { background: linear-gradient(90deg, #6fe0a0, #1fae62); }
+.lv-bin.bad .lv-fill i { background: linear-gradient(90deg, #ffc58f, #ef7d2d); }
+
+.lv-burst i.spark, .lv-burst.good i.spark, .lv-burst.defect i.spark { width: .6cqw; height: .6cqw; min-width: 5px; min-height: 5px; border: 0; border-radius: 50%; opacity: 0; animation: lvSpark .8s ease-out forwards; }
+.lv-burst.good i.spark { background: #3fe38c; box-shadow: 0 0 .6cqw #3fe38c; }
+.lv-burst.defect i.spark { background: #ff9a3d; box-shadow: 0 0 .6cqw #ff9a3d; }
+@keyframes lvSpark { 0% { opacity: 1; transform: translate(-50%, -50%) rotate(var(--a)) translateX(0); } 100% { opacity: 0; transform: translate(-50%, -50%) rotate(var(--a)) translateX(var(--d)) scale(.4); } }
+
+/* Stats HUD (bottom-left floor): defect-rate gauge + 5-minute throughput sparkline */
+.lv-stats { left: 1.2%; bottom: 4%; gap: 1.2cqw; padding: .7cqw 1.1cqw; }
+.lv-gauge { position: relative; width: 8.5cqw; min-width: 76px; display: flex; flex-direction: column; align-items: center; }
+.lv-gauge svg { display: block; width: 100%; }
+.lv-gauge path { fill: none; stroke-width: 9; stroke-linecap: round; }
+.lv-gauge path.track { stroke: rgba(16,53,42,.12); }
+.lv-gauge path.val { transition: stroke-dasharray .8s ease-out, stroke .4s; }
+.lv-gauge path.val.good { stroke: #2fae62; } .lv-gauge path.val.warn { stroke: #f0a040; } .lv-gauge path.val.bad { stroke: #e2553a; }
+.lv-gauge strong { margin-top: -1.9cqw; font-size: max(13px, 1.35cqw); line-height: 1; letter-spacing: -.02em; }
+.lv-gauge span { font-size: max(8px, .6cqw); }
+.lv-spark { display: flex; flex-direction: column; gap: .25cqw; width: 15cqw; min-width: 120px; }
+.lv-spark svg { display: block; width: 100%; height: 3cqw; min-height: 24px; }
+.lv-spark rect.g { fill: #3fb871; } .lv-spark rect.d { fill: #f0995a; }
+.lv-spark span { font-size: max(8px, .6cqw); }
+
+.lv-model-banner { position: absolute; left: 50%; top: 3%; transform: translateX(-50%); z-index: 7; display: flex; align-items: center; gap: .6cqw; padding: .55cqw 1.4cqw; border-radius: 2cqw; background: linear-gradient(90deg, #0d7c6c, #2456c9); color: #fff; font-size: max(11px, .95cqw); font-weight: 900; letter-spacing: .04em; white-space: nowrap; box-shadow: 0 0 2cqw rgba(51,140,240,.55); animation: lvBannerIn .6s cubic-bezier(.2, 1.4, .4, 1); }
+.lv-model-banner b { padding: .1cqw .6cqw; border-radius: .6cqw; background: rgba(255,255,255,.18); letter-spacing: 0; }
+.lv-model-banner i { font-style: normal; }
+@keyframes lvBannerIn { from { opacity: 0; transform: translate(-50%, -1.5cqw) scale(.8); } to { opacity: 1; transform: translateX(-50%); } }
+
+.lv-alert-banner { position: absolute; left: 50%; bottom: 4%; transform: translateX(-50%); z-index: 7; max-width: 46%; display: flex; align-items: center; gap: .6cqw; padding: .5cqw 1.2cqw; border-radius: 1cqw; color: #fff; font-size: max(10px, .85cqw); white-space: nowrap; overflow: hidden; animation: lvBannerIn .5s ease-out; }
+.lv-alert-banner span { overflow: hidden; text-overflow: ellipsis; opacity: .9; }
+.lv-alert-banner.critical { background: rgba(200,40,30,.92); box-shadow: 0 0 2cqw rgba(226,60,40,.6); }
+.lv-alert-banner.warning { background: rgba(214,120,20,.92); box-shadow: 0 0 2cqw rgba(240,150,40,.55); }
+.live-stage.alerting .lv-scene::after { content: ""; position: absolute; inset: 0; z-index: 6; pointer-events: none; border-radius: inherit; animation: lvAlertPulse 1.6s ease-in-out infinite; }
+.live-stage.alerting.critical .lv-scene::after { box-shadow: inset 0 0 4cqw rgba(226,60,40,.6); }
+.live-stage.alerting.warning .lv-scene::after { box-shadow: inset 0 0 4cqw rgba(240,150,40,.55); }
+@keyframes lvAlertPulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+
+.lv-powerup { position: absolute; inset: 0; z-index: 6; pointer-events: none; background: linear-gradient(100deg, transparent 35%, rgba(170,255,225,.6) 50%, transparent 65%); background-size: 300% 100%; animation: lvSweep 1.4s ease-out forwards; }
+@keyframes lvSweep { from { background-position: 100% 0; opacity: 1; } to { background-position: 0 0; opacity: 0; } }
+.lv-power-off { position: absolute; inset: 0; z-index: 5; pointer-events: none; background: rgba(6,22,16,.32); animation: lvPowerOff 1.2s linear forwards; }
+@keyframes lvPowerOff { 0% { opacity: 0; } 10% { opacity: .6; } 14% { opacity: .1; } 22% { opacity: .7; } 28% { opacity: .3; } 100% { opacity: 1; } }
+
+/* TV mode: Sorting card fills the screen, dark control-room look */
+.live-stage-card.tv { position: fixed; inset: 0; z-index: 300; border-radius: 0; border: 0; padding: 16px 22px 20px; background: radial-gradient(ellipse at top, #12332a, #050d0a 70%); }
+.live-stage-card.tv .live-card-head h2 { color: #fff; font-size: 18px; letter-spacing: .02em; }
+.live-stage-card.tv .live-card-head span { color: #8fd3b4; font-size: 12px; }
+.live-stage-card.tv .lv-tool { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.16); color: #cfeee0; }
+.live-stage-card.tv .live-stage { background: #06140f; }
+.live-stage-card.tv .live-stage::before { opacity: .22; }
+.lv-tv-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.lv-tv-kpis > div { padding: 10px 14px; border-radius: 12px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); min-width: 0; }
+.lv-tv-kpis span { display: block; font-size: 12px; color: #8fb8a6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv-tv-kpis strong { display: block; color: #fff; font-size: clamp(22px, 3vw, 46px); font-weight: 900; line-height: 1.1; font-variant-numeric: tabular-nums; letter-spacing: -.03em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv-tv-kpis strong.small { font-size: clamp(14px, 1.4vw, 22px); padding-top: .4em; }
+.lv-tv-kpis .good strong { color: #5ee39a; } .lv-tv-kpis .bad strong { color: #ffab5e; }
+@media (max-width: 760px) { .lv-tv-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .live-stage-card.tv { padding: 12px 16px; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .lv-belt.run, .lv-belt.wind, .lv-scan.on, .lv-gate-ring.on, .lv-paddle.kick, .lv-paddle.kick i, .lv-burst i.spark, .lv-power-off, .live-stage.alerting .lv-scene::after { animation: none !important; }
+  .lv-powerup { display: none; }
+}
+
+/* ---------- Live scene 3D (three.js canvas under the same HUD chips) ---------- */
+.lv-tool.lv-tool-text { width: auto; padding: 0 9px; font-size: 11px; font-weight: 900; letter-spacing: .04em; }
+.lv-scene.lv3d { background: #e7f1eb; }
+.live-stage-card.tv .lv-scene.lv3d { background: #07130f; }
+.lv3d-canvas { position: absolute !important; inset: 0; z-index: 0; }
+.lv3d-loading { position: absolute; inset: 0; display: grid; place-items: center; color: #6b7d74; font-size: 13px; }
+.lv-scene.lv3d .lv-hud-cam { left: 1.2%; top: 12%; }
+.lv-scene.lv3d .lv-streak { top: 21%; }
+.lv-scene.lv3d .lv-stats { display: none; }
+.lv-scene.lv3d .lv-power-off { background: rgba(6,22,16,.18); }
+.lv-scene.lv3d .lv-stopped { z-index: 8; }
+.lv3d-tag { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 7px; font: 900 11px/1.2 var(--font-thai), sans-serif; white-space: nowrap; color: #fff; transform: translateY(-4px); animation: lvBannerIn3d .25s ease-out; }
+.lv3d-tag i { font-style: normal; font-weight: 700; opacity: .8; font-size: 10px; }
+.lv3d-tag.scan { background: rgba(6,58,51,.88); color: #7ff7e0; border: 1px solid #33f0d0; box-shadow: 0 0 10px rgba(51,240,208,.6); }
+.lv3d-tag.good { background: #1fae62; box-shadow: 0 0 12px rgba(31,174,98,.7); }
+.lv3d-tag.defect { background: #ef7d2d; box-shadow: 0 0 12px rgba(239,125,45,.7); }
+@keyframes lvBannerIn3d { from { opacity: 0; transform: translateY(4px) scale(.85); } to { opacity: 1; transform: translateY(-4px); } }
+.lv3d-root { position: absolute; inset: 0; z-index: 0; font-family: var(--font-thai), sans-serif; }
+.lv-scene.lv3d .lv-alert-banner { bottom: 13%; }
+/* crate labels floating in the scene */
+.lv3d-bin { display: flex; flex-direction: column; align-items: center; min-width: 92px; padding: 5px 11px 6px; border-radius: 10px; background: rgba(255,255,255,.9); border: 1.5px solid; box-shadow: 0 6px 18px rgba(16,53,42,.22); color: #10352a; white-space: nowrap; }
+.lv3d-bin span { font-size: 10px; font-weight: 800; letter-spacing: .03em; color: #4f6459; }
+.lv3d-bin strong { font-size: 28px; line-height: 1.05; font-weight: 900; letter-spacing: -.03em; display: inline-block; }
+.lv3d-bin strong.pop { animation: lvPop .5s ease-out; }
+.lv3d-bin em { font-style: normal; font-size: 10px; font-weight: 600; color: #6b7d74; }
+.lv3d-bin-fill { width: 100%; height: 4px; margin: 3px 0 2px; border-radius: 3px; background: rgba(16,53,42,.12); overflow: hidden; }
+.lv3d-bin-fill i { display: block; height: 100%; border-radius: inherit; transition: width .4s; }
+.lv3d-bin.good { border-color: rgba(80,220,140,.9); } .lv3d-bin.good strong { color: #1a7f47; } .lv3d-bin.good .lv3d-bin-fill i { background: linear-gradient(90deg, #6fe0a0, #1fae62); }
+.lv3d-bin.defect { border-color: rgba(255,170,80,.95); } .lv3d-bin.defect strong { color: #c0621f; } .lv3d-bin.defect .lv3d-bin-fill i { background: linear-gradient(90deg, #ffc58f, #ef7d2d); }
+/* holographic stats panel header */
+.lv3d-holo { display: flex; align-items: baseline; gap: 14px; color: #bffcf2; white-space: nowrap; text-shadow: 0 0 8px rgba(47,224,192,.9); }
+.lv3d-holo div { display: flex; align-items: baseline; gap: 4px; }
+.lv3d-holo b { font-size: 26px; font-weight: 900; color: #e6fffb; }
+.lv3d-holo span, .lv3d-holo em { font-size: 13px; font-weight: 700; letter-spacing: .04em; font-style: normal; opacity: .85; }
+.lv3d-holo .warn b { color: #ffd27a; } .lv3d-holo .bad b { color: #ff8f7a; }
+/* camera presets / options / picked fruit */
+.lv3d-cams, .lv3d-opts { position: absolute; bottom: 2.2%; z-index: 7; display: flex; align-items: center; gap: 4px; padding: 4px; border-radius: 10px; background: rgba(255,255,255,.82); border: 1px solid rgba(255,255,255,.9); box-shadow: 0 4px 14px rgba(16,53,42,.16); font-size: 11px; }
+.lv3d-cams { left: 1.2%; }
+.lv3d-cams, .lv3d-opts, .lv3d-cams button, .lv3d-quality button { white-space: nowrap; }
+.lv3d-opts { right: 1.2%; padding-left: 8px; gap: 8px; }
+.lv3d-cams button, .lv3d-quality button { border: 0; background: transparent; padding: 4px 9px; border-radius: 7px; font: 800 11px/1.2 var(--font-thai), sans-serif; color: #2c4a3e; cursor: pointer; }
+.lv3d-cams button:hover, .lv3d-quality button:hover { background: rgba(13,124,108,.1); }
+.lv3d-cams button.on, .lv3d-quality button.on { background: #0d7c6c; color: #fff; }
+.lv3d-cams span { padding: 0 6px 0 4px; color: #6b7d74; font-weight: 600; font-size: 10px; }
+.lv3d-clock { display: inline-flex; align-items: center; gap: 4px; color: #4f6459; font-weight: 700; }
+.lv3d-quality { display: inline-flex; align-items: center; gap: 2px; color: #4f6459; font-weight: 700; }
+.lv3d-quality em { font-style: normal; color: #b0641a; font-size: 10px; margin-left: 4px; }
+.lv3d-pick { position: absolute; right: 1.2%; top: 3%; z-index: 7; width: 210px; padding: 9px 11px 10px; border-radius: 12px; background: rgba(255,255,255,.94); border: 1.5px solid #ffe14d; box-shadow: 0 8px 24px rgba(16,53,42,.22); color: #10352a; font-size: 12px; animation: lvBannerIn3d .25s ease-out; }
+.lv3d-pick-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.lv3d-pick-head b { font-size: 15px; font-weight: 900; }
+.lv3d-pick-head span { flex: 1; font-size: 10px; font-weight: 700; color: #6b7d74; }
+.lv3d-pick-head button { border: 0; background: rgba(16,53,42,.08); border-radius: 6px; width: 22px; height: 22px; display: grid; place-items: center; cursor: pointer; color: #2c4a3e; }
+.lv3d-pick dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; }
+.lv3d-pick dt { color: #6b7d74; font-weight: 600; }
+.lv3d-pick dd { margin: 0; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv3d-pick dd.good { color: #1a7f47; } .lv3d-pick dd.defect { color: #c0621f; }
+.lv3d-pick-follow { margin-top: 8px; width: 100%; border: 0; border-radius: 7px; padding: 5px; background: #0d7c6c; color: #fff; font: 800 11px var(--font-thai), sans-serif; cursor: pointer; }
+.live-stage-card.tv .lv3d-cams, .live-stage-card.tv .lv3d-opts { background: rgba(8,30,24,.72); border-color: rgba(255,255,255,.12); }
+.live-stage-card.tv .lv3d-cams button, .live-stage-card.tv .lv3d-quality button, .live-stage-card.tv .lv3d-clock, .live-stage-card.tv .lv3d-quality { color: #cfeee0; }
+.live-stage-card.tv .lv3d-cams button.on, .live-stage-card.tv .lv3d-quality button.on { background: #19a88f; color: #fff; }
+.lv3d-auto { font-style: normal; font-size: 10px; font-weight: 700; color: #b0641a; padding-right: 4px; }
+.lv3d-cams button.walk { background: #ffd21f; color: #3a2a00; margin-left: 4px; }
+.lv3d-cams button.walk:hover { background: #ffdf55; }
+.lv3d-cams button.exit { background: rgba(192,57,43,.12); color: #b13a2c; margin-left: 4px; }
+/* walk mode */
+.lv3d-root.walking .lv3d-canvas { cursor: crosshair; }
+.lv-scene.lv3d:has(.lv3d-root.walking) > .lv-hud, .lv-scene.lv3d:has(.lv3d-root.walking) > .lv-stopped { display: none; }
+.lv3d-map { position: absolute; right: 1.2%; top: 3%; z-index: 7; width: 230px; height: 150px; border-radius: 10px; box-shadow: 0 4px 14px rgba(16,53,42,.25); }
+.lv3d-map .bg { fill: rgba(8,28,22,.82); stroke: rgba(255,255,255,.25); stroke-width: .15; }
+.lv3d-map .belt { stroke: #7fa39a; stroke-width: 1.4; stroke-linecap: round; }
+.lv3d-map .belt.good { stroke: #38c983; } .lv3d-map .belt.defect { stroke: #ef8d3f; }
+.lv3d-map .crate.good { fill: #2f9e63; } .lv3d-map .crate.defect { fill: #d8752e; }
+.lv3d-map .gantry { fill: #4dffe0; }
+.lv3d-map .board { stroke: #cfeee0; stroke-width: .5; }
+.lv3d-map .tree { fill: rgba(79,174,85,.55); }
+.lv3d-map .me { fill: #ffd21f; stroke: #3a2a00; stroke-width: .15; }
+.lv3d-cross { position: absolute; left: 50%; top: 50%; z-index: 7; width: 14px; height: 14px; transform: translate(-50%, -50%); pointer-events: none; }
+.lv3d-cross::before, .lv3d-cross::after { content: ""; position: absolute; background: rgba(255,255,255,.9); box-shadow: 0 0 2px rgba(0,0,0,.6); }
+.lv3d-cross::before { left: 6px; top: 0; width: 2px; height: 14px; } .lv3d-cross::after { top: 6px; left: 0; height: 2px; width: 14px; }
+.lv3d-walk-help { position: absolute; left: 50%; bottom: 11%; z-index: 9; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 20px; border-radius: 14px; background: rgba(8,28,22,.86); color: #dff7ee; box-shadow: 0 10px 30px rgba(0,0,0,.35); text-align: center; }
+.lv3d-walk-help b { font-size: 15px; }
+.lv3d-walk-help > button { border: 0; border-radius: 9px; padding: 8px 18px; background: #ffd21f; color: #3a2a00; font: 900 13px var(--font-thai), sans-serif; cursor: pointer; }
+.lv3d-walk-help ul { margin: 0; padding: 0; list-style: none; font-size: 11px; line-height: 1.9; color: #b9dccd; }
+.lv3d-root kbd { display: inline-block; padding: 0 5px; border-radius: 4px; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.3); font: 800 10px/1.6 ui-monospace, monospace; color: #fff; }
+.lv3d-prompt { position: absolute; left: 50%; top: 58%; z-index: 7; transform: translateX(-50%); padding: 6px 14px; border-radius: 10px; background: rgba(8,28,22,.85); color: #fff; font-size: 13px; font-weight: 800; pointer-events: none; }
+.lv3d-crate { position: absolute; right: 1.2%; top: 3%; bottom: 13%; z-index: 8; width: 270px; overflow: auto; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,.96); border: 2px solid; box-shadow: 0 10px 30px rgba(16,53,42,.3); color: #10352a; font-size: 12px; animation: lvBannerIn3d .25s ease-out; }
+.lv3d-crate.good { border-color: #38c983; } .lv3d-crate.defect { border-color: #ef8d3f; }
+.lv3d-crate .big { display: block; font-size: 30px; font-weight: 900; letter-spacing: -.03em; line-height: 1.1; }
+.lv3d-crate.good .big { color: #1a7f47; } .lv3d-crate.defect .big { color: #c0621f; }
+.lv3d-crate .big small { font-size: 12px; color: #6b7d74; font-weight: 700; }
+.lv3d-crate h4 { margin: 10px 0 4px; font-size: 11px; color: #4f6459; letter-spacing: .03em; }
+.lv3d-crate .row { display: grid; grid-template-columns: 62px 1fr 34px; align-items: center; gap: 6px; margin: 3px 0; }
+.lv3d-crate .row i { height: 7px; border-radius: 4px; background: rgba(16,53,42,.1); overflow: hidden; }
+.lv3d-crate .row i b { display: block; height: 100%; border-radius: inherit; }
+.lv3d-crate.good .row i b { background: #38c983; } .lv3d-crate.defect .row i b { background: #ef8d3f; }
+.lv3d-crate .row em { font-style: normal; font-weight: 800; text-align: right; }
+.lv3d-crate ul { margin: 0; padding: 0; list-style: none; }
+.lv3d-crate li { display: grid; grid-template-columns: 44px 1fr 32px 58px; gap: 4px; padding: 3px 0; border-bottom: 1px solid rgba(16,53,42,.07); font-size: 11px; }
+.lv3d-crate li em { font-style: normal; color: #4f6459; text-align: right; } .lv3d-crate li time { color: #6b7d74; text-align: right; }
+.lv3d-crate .none { margin: 2px 0; color: #8a9a92; font-size: 11px; }
+@container (max-width: 1100px) { .lv3d-cams span { display: none; } }
+@container (max-width: 820px) { .lv3d-clock { display: none; } .lv3d-cams button, .lv3d-quality button { padding: 3px 6px; font-size: 10px; } }
+@container (max-width: 560px) { .lv3d-opts { bottom: auto; top: 3%; } .lv3d-quality > em { display: none; } .lv3d-pick { width: 170px; font-size: 11px; top: 13%; } }
+@media (prefers-reduced-motion: reduce) { .lv3d-bin strong.pop, .lv3d-pick, .lv3d-tag { animation: none !important; } }
+
+/* Run / pause gate for a CIRA CORE device (Live header, admin) */
+.live-stage.stopped .lv-scene.lv3d:has(.lv3d-root.walking) { filter: none; }
+.lv-scene.lv3d > .lv-stopped, .lv-scene.lv3d > .lv-power-off { display: none; }
+.live-stage.stopped .lv-scene.lv3d { filter: none; }
+.lv3d-root.walking .lv3d-pick { top: calc(3% + 162px); }
+.lv3d-pick-note { margin: 6px 0 0; font-size: 10px; color: #8a6a1a; }
+.lv3d-cams select { border: 0; border-radius: 7px; padding: 4px 8px; background: #0d7c6c; color: #fff; font: 800 11px/1.2 var(--font-thai), sans-serif; cursor: pointer; }
+.lv3d-map .console { fill: #ffd21f; }
+.lv3d-map .alert { fill: none; stroke: #ff9b2f; stroke-width: .35; animation: lv3dMapPulse 1.2s ease-in-out infinite; }
+.lv3d-map .alert.critical { stroke: #ff3b2f; }
+@keyframes lv3dMapPulse { 50% { opacity: .2; } }
+.lv3d-toast { position: absolute; left: 50%; top: 14%; z-index: 9; transform: translateX(-50%); padding: 7px 14px; border-radius: 10px; background: rgba(120,30,20,.9); color: #fff; font-size: 12px; font-weight: 800; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .lv3d-map .alert { animation: none; } }
+
+/* Live 3D phase 3: cat speech bubble, free-cursor chip, minimap site */
+.lv3d-meow { padding: 3px 10px; border-radius: 12px; background: #fff; color: #b4532a; font: 900 13px var(--font-thai), sans-serif; white-space: nowrap; box-shadow: 0 3px 10px rgba(0,0,0,.25); position: relative; animation: lv3dMeow 1.6s ease-out forwards; }
+.lv3d-meow::after { content: ""; position: absolute; left: 50%; bottom: -6px; transform: translateX(-50%); border: 6px solid transparent; border-bottom: 0; border-top-color: #fff; }
+@keyframes lv3dMeow { 0% { opacity: 0; transform: translateY(6px) scale(.7); } 12% { opacity: 1; transform: translateY(0) scale(1.08); } 22% { transform: scale(1); } 80% { opacity: 1; } 100% { opacity: 0; transform: translateY(-8px); } }
+@media (prefers-reduced-motion: reduce) { .lv3d-meow { animation: none; } }
+.lv3d-free { position: absolute; left: 50%; bottom: 11%; z-index: 9; transform: translateX(-50%); padding: 7px 14px; border-radius: 10px; background: rgba(8,28,22,.82); color: #dff7ee; font-size: 12px; font-weight: 700; pointer-events: none; }
+.lv3d-free kbd { padding: 0 5px; border-radius: 4px; background: rgba(255,255,255,.18); font: inherit; }
+.lv3d-map .shed { fill: rgba(200,220,212,.08); stroke: rgba(207,238,224,.45); stroke-width: .25; }
+.lv3d-map .truck { fill: #f3f1ea; }
+.lv3d-map .deck { fill: rgba(184,141,94,.7); }
+.lv3d-map .cat { fill: #ff9a6a; stroke: #fff; stroke-width: .15; }
+
+/* Live 3D: time menu, emergency drills, team figures */
+.lv3d-time { border: 1px solid rgba(13,124,108,.25); border-radius: 7px; background: #fff; padding: 2px 4px; font: 700 11px var(--font-thai), sans-serif; color: #2c4a3e; cursor: pointer; }
+.lv3d-cams button.drill { background: #3a2a10; color: #ffd27a; }
+.lv3d-cams button.drill.on { background: #e5453a; color: #fff; animation: lv3dDrill 1s steps(2) infinite; }
+@keyframes lv3dDrill { 50% { background: #7a1a14; } }
+.lv3d-emerg { position: absolute; left: 50%; top: 2.5%; z-index: 9; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; max-width: 86%; padding: 8px 10px 8px 14px; border-radius: 12px; background: rgba(20,8,6,.88); border: 2px solid var(--c); color: #fff; font-size: 12px; box-shadow: 0 0 22px var(--c); }
+.lv3d-emerg b { color: var(--c); font-size: 14px; white-space: nowrap; }
+.lv3d-emerg span { color: #f1d9d3; line-height: 1.4; }
+.lv3d-emerg button { border: 0; border-radius: 8px; padding: 6px 12px; background: #fff; color: #7a1a14; font: 900 12px var(--font-thai), sans-serif; cursor: pointer; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .lv3d-cams button.drill.on { animation: none; } }
+.lv3d-test { position: absolute; left: 50%; top: 50%; z-index: 10; transform: translate(-50%, -50%); width: min(380px, 90%); padding: 12px; border-radius: 14px; background: rgba(8,20,16,.94); color: #e8f5ef; box-shadow: 0 12px 34px rgba(0,0,0,.4); display: flex; flex-direction: column; gap: 6px; }
+.lv3d-test .lv3d-pick-head span { color: #9cc8b8; font-size: 11px; }
+.lv3d-test .lv3d-pick-head button { margin-left: auto; border: 0; background: transparent; color: #cfd8d3; cursor: pointer; }
+.lv3d-test > button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; border: 1px solid rgba(255,255,255,.12); border-left: 5px solid var(--c); border-radius: 9px; padding: 7px 10px; background: rgba(255,255,255,.05); color: #fff; font: 600 11px var(--font-thai), sans-serif; cursor: pointer; }
+.lv3d-test > button b { font-size: 13px; color: var(--c); }
+.lv3d-test > button span { color: #b9d3c9; }
+.lv3d-test > button:hover, .lv3d-test > button.on { background: rgba(255,255,255,.14); }
+.lv3d-test > button.stop { border-left-color: #fff; align-items: center; font-weight: 900; }
+.lv3d-member { display: flex; align-items: center; gap: 5px; padding: 2px 8px 2px 2px; border-radius: 999px; background: rgba(255,255,255,.92); border: 2px solid var(--c); color: #24352d; font: 800 11px var(--font-thai), sans-serif; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+.lv3d-member b { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--c); color: #fff; font-size: 11px; }
+.lv3d-team { position: absolute; right: 1.2%; top: 50%; z-index: 9; transform: translateY(-50%); width: min(300px, 86%); padding: 14px 16px; border-radius: 16px; background: #fff; border: 3px solid var(--c); color: #1d2b25; box-shadow: 0 12px 34px rgba(0,0,0,.3); display: flex; flex-direction: column; gap: 2px; }
+.lv3d-team-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.lv3d-team-head i { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--c); color: #fff; font: 900 18px var(--font-thai), sans-serif; font-style: normal; }
+.lv3d-team-head span { color: #7a8a82; font-weight: 800; font-size: 11px; letter-spacing: .05em; }
+.lv3d-team-head button { margin-left: auto; border: 0; background: transparent; color: #7a8a82; cursor: pointer; }
+.lv3d-team small { color: #8a978f; font-size: 10px; font-weight: 700; margin-top: 6px; }
+.lv3d-team strong { font-size: 19px; font-weight: 900; border-bottom: 2px solid #1d2b25; padding-bottom: 6px; }
+.lv3d-team > b { color: #18a058; font-size: 14px; font-weight: 900; }
+.lv3d-team p { margin: 4px 0 6px; color: #4f5f57; font-size: 12px; line-height: 1.5; }
+.lv3d-team em { border-top: 1px solid #e6ece8; padding-top: 6px; color: #8a978f; font-size: 10px; font-style: normal; }
+.lv3d-map .dog { fill: #d8a465; stroke: #fff; stroke-width: .15; }
+.lv3d-map .member { stroke: #fff; stroke-width: .12; }
+.lv3d-map .test { fill: #f2c230; }
+.lv3d-emerg button.mute { display: grid; place-items: center; padding: 6px 8px; background: rgba(255,255,255,.15); color: #fff; }

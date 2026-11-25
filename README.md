@@ -119,7 +119,18 @@ foreach ($f in "schema_core.sql","migration_001_names.sql","migration_002.sql","
 
 ### 5. รัน
 
+ทุกอย่างใน Docker (เว็บ, writer, alert_watcher, telegram_bot รวมอยู่ใน `docker-compose.yml`):
+
 ```powershell
+docker compose up -d --build   # ครั้งแรก / หลังแก้โค้ด
+docker compose up -d           # ครั้งต่อไป
+docker compose logs -f writer watcher
+```
+
+หรือรันบนเครื่องตอนพัฒนา (หยุด container ที่ซ้ำกันก่อน):
+
+```powershell
+docker compose stop web writer
 npm run dev        # เว็บ http://localhost:3000 + alert_watcher + telegram_bot
 npm run writer     # อีกหน้าต่าง: MQTT → DB
 ```
@@ -133,7 +144,11 @@ npm run sim                                        # 30 ผล/นาที จ�
 npm run sim -- --rate 120 --defect-pct 60
 npm run sim -- --switch-model sim-v2 --switch-after 60
 npm run sim -- --bad-pct 5 --dup-pct 10            # ทดสอบการปฏิเสธ payload และกันนับซ้ำ
+npm run sim -- --scenario demo                     # กะจำลอง ~5 นาที: เร่งไลน์ → พีค → ล็อตเสีย → สลับโมเดล → กล้องหลุด → กลับมา
+npm run sim -- --scenario demo --loop --speed 2    # วนซ้ำไม่หยุด เร็วขึ้น 2 เท่า (ไว้เปิดโชว์)
 ```
+
+หน้า Live มีฉาก 2D / 3D (ปุ่ม 2D/3D, จำค่าไว้ในเบราว์เซอร์) และโหมดจอใหญ่ `/simulate?tv=1`
 
 ## npm scripts
 

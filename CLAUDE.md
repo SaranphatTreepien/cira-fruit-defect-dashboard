@@ -18,10 +18,11 @@ CIRA CORE (จริง) / scripts/mqtt_sim.py ─MQTT cira/fruit/events + cira/
 
 ## ข้อจำกัดของ CIRA CORE (ยืนยันจากการทดสอบ)
 
-- CIRA CORE เป็น node-based: Start/Stop, เปลี่ยนโมเดล, threshold, ความเร็ว, กล้อง **ต้องทำใน CIRA CORE เอง** เว็บสั่งไม่ได้
+- CIRA CORE เป็น node-based: Start/Stop, เปลี่ยนโมเดล, threshold, ความเร็ว, เปิด/ปิดกล้อง (สวิตช์บน node) **ต้องทำใน CIRA CORE เอง** · ไม่มี API/ROS service ให้สั่งจากภายนอก (ตรวจแล้ว 2026-11-25)
 - เว็บทำได้แค่ **รับค่าและดักสถานะ**: event ผลไม้ + heartbeat สถานะเครื่อง ผ่าน MQTT
+- **ไม่มีปุ่มหยุด/ทำงานต่อจากเว็บแล้ว** (เอาออก 2026-11-25: ผู้ใช้สับสน) · สถานะเครื่องบนเว็บแสดงตามที่ CIRA CORE ส่งมาเท่านั้น · `device_commands` + `/api/core/command` ยังอยู่เพราะ flow `Demo_Detect_Orange_webcontrol.npj` อ่าน GET ทุกรอบ (CAM_01 ค่าล่าสุด run=true) · ห้ามเปลี่ยนค่าในตารางนี้
 - เขียนโค้ดอิสระได้เฉพาะในกล่อง `Python` ของ flow (ใช้สร้าง payload) · field ที่ CORE สร้างไม่ได้ให้ adapter ฝั่งเรา (`mqtt_to_db.py`) เติม
-- อย่าสร้างหน้า/ปุ่มที่ทำเหมือนควบคุมหรือตั้งค่า CORE ได้
+- อย่าสร้างหน้า/ปุ่มที่ทำเหมือนควบคุมหรือตั้งค่า CORE ได้ (ปุ่ม "จำลองเหตุฉุกเฉิน" ในฉาก 3D เป็นแค่ภาพ ไม่ส่งคำสั่ง)
 
 ## ขอบเขต Dashboard
 
@@ -46,9 +47,12 @@ Schema ปัจจุบันเป็นร่างจาก output ทด�
 ## สถานะปัจจุบัน (2026-11-19)
 
 - Docker: `cira-db` (PostgreSQL 16, host port **`127.0.0.1:15432`** → 5432 ใน container), `cira-mqtt` (`1883`), `cira-adminer` (`8080`)
-- รัน: `npm run dev` = เว็บ + alert_watcher + telegram_bot · `python scripts/mqtt_to_db.py` รันแยก (เปิด mqtt_status.py ให้เอง)
-- ไม่มี CORE: `python scripts/mqtt_sim.py` (ดู `--help`: rate, defect, สลับโมเดล, payload เสีย, ส่งซ้ำ)
-- Migration ล่าสุด `db/migration_006_auth.sql` (users, user_sessions, alerts.acked_by_user, กฎ model_change / daily_report)
+- รันทั้งหมดใน Docker: `docker compose up -d --build` = db + mqtt + adminer + `cira-web` (3000) + `cira-writer` (mqtt_to_db + mqtt_status) + `cira-watcher` + `cira-bot` · ใน container ใช้ host `db:5432` / `mosquitto:1883` (ตั้งใน compose ทับ `.env.local`)
+- ลิงก์สาธารณะ: service `tunnel` (`cira-tunnel`, Cloudflare quick tunnel ไป `web:3000`) รันพร้อม compose · ลิงก์ trycloudflare.com เปลี่ยนทุกครั้งที่ container เริ่มใหม่ ดูลิงก์ปัจจุบันด้วย `npm run tunnel:url` · คนที่มีลิงก์เข้า demo admin ได้ (ตั้งใจให้เพื่อนทดสอบ) · ปิดด้วย `docker compose stop tunnel`
+- รันบนเครื่อง (dev): `docker compose stop web writer` ก่อน แล้ว `npm run dev` = เว็บ + alert_watcher + telegram_bot · `python scripts/mqtt_to_db.py` รันแยก (เปิด mqtt_status.py ให้เอง)
+- ไม่มี CORE: `python scripts/mqtt_sim.py` (ดู `--help`: rate, defect, สลับโมเดล, payload เสีย, ส่งซ้ำ, `--scenario demo` กะจำลอง ~5 นาที)
+- Live scene: 2D (ภาพ + CSS) หรือ 3D (`src/components/LiveScene3D.tsx`, three.js โหลดเฉพาะตอนใช้) · ผลไม้เล่นซ้ำทีละลูกตาม `ts` ของ CORE จาก `/api/live?since=`
+- Migration ล่าสุด `db/migration_007_device_command.sql` (ตาราง device_commands) · ก่อนหน้า `db/migration_006_auth.sql` (users, user_sessions, alerts.acked_by_user, กฎ model_change / daily_report)
 - Login: ทุก API ต้อง login (`requireUser` ใน `src/lib/auth.ts`) · ครั้งแรกที่ยังไม่มีผู้ใช้ หน้า `/login` ให้สร้าง Admin คนแรก
 - ทดสอบความทนทาน: `python scripts/failure_test.py --yes` + `DOC/failure-test-checklist.md`
 - ยังไม่ทำ: Quick Model, ยืนยัน JSON contract กับทีม C, sync/PROD (พักไว้), LINE

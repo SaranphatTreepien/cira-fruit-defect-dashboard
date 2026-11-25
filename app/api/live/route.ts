@@ -13,6 +13,10 @@ export async function GET(request: NextRequest) {
   if (auth instanceof NextResponse) return auth;
   const requested = Number(request.nextUrl.searchParams.get('window'));
   const windowMin = ALLOWED_WINDOWS.includes(requested) ? requested : 15;
+  // ?since=<created_at ISO>: also return every event written after that batch, one row per fruit,
+  // so the Live scene can replay them one by one at their CORE timestamps.
+  const sinceParam = Date.parse(request.nextUrl.searchParams.get('since') ?? '');
+  const since = Number.isNaN(sinceParam) ? null : new Date(sinceParam).toISOString();
 
   // ?lite=1: only what the top bar / sidebar show on every page (machine state, events per minute,
   // current model) -- 3 small queries instead of the 7 the Live page needs.
@@ -35,7 +39,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const [device, last, byFruit, rate, recent, byDefect, latency, batches] = await Promise.all([
+    const [device, last, byFruit, rate, recent, byDefect, latency, batches, spark, fresh] = await Promise.all([
       pool.query(`SELECT device_id, source_type, state, last_seen, age_sec
                   FROM device_status_live ORDER BY last_seen DESC LIMIT 1`),
       pool.query('SELECT max(ts) AS last_event_at FROM fruit_events'),
@@ -75,12 +79,41 @@ export async function GET(request: NextRequest) {
          FROM fruit_events WHERE created_at >= now() - interval '10 minutes'
          GROUP BY created_at ORDER BY created_at DESC LIMIT 30`,
       ),
+      // 5-second buckets of the last 5 minutes (by CORE timestamp) for the throughput sparkline
+      pool.query(
+        `SELECT (floor(extract(epoch FROM ts) / 5) * 5)::bigint AS t, count(*)::int AS n,
+                count(*) FILTER (WHERE external_result = 'defect')::int AS defect
+         FROM fruit_events WHERE ts >= now() - interval '5 minutes'
+         GROUP BY 1 ORDER BY 1`,
+      ),
+      since
+        ? pool.query(
+            `SELECT event_id, ts, fruit_type, external_result, defect_type, confidence,
+                    track_id, camera_view, model_version, created_at
+             FROM fruit_events WHERE created_at >= $1::timestamptz + interval '1 millisecond'
+             ORDER BY ts ASC LIMIT 400`,
+            [since],
+          )
+        : Promise.resolve(null),
     ]);
 
     const d = device.rows[0];
     const fruits = byFruit.rows as { fruit_type: string; total: number; good: number; defect: number }[];
     const sum = (key: 'total' | 'good' | 'defect') => fruits.reduce((acc, row) => acc + row[key], 0);
     const iso = (value: unknown) => (value ? new Date(value as string).toISOString() : null);
+
+    const event = (row: Record<string, unknown>) => ({
+      event_id: row.event_id,
+      ts: iso(row.ts),
+      fruit_type: row.fruit_type,
+      external_result: row.external_result,
+      defect_type: row.defect_type,
+      confidence: row.confidence == null ? null : Number(row.confidence),
+      track_id: row.track_id,
+      camera_view: row.camera_view,
+      model_version: row.model_version,
+      created_at: iso(row.created_at),
+    });
 
     return NextResponse.json({
       now: new Date().toISOString(),
@@ -99,18 +132,9 @@ export async function GET(request: NextRequest) {
       by_fruit: fruits,
       by_defect: byDefect.rows.map((row) => ({ defect_type: row.defect_type ?? 'ไม่ระบุ', n: row.n })),
       events_last_minute: rate.rows[0]?.n ?? 0,
-      recent: recent.rows.map((row) => ({
-        event_id: row.event_id,
-        ts: iso(row.ts),
-        fruit_type: row.fruit_type,
-        external_result: row.external_result,
-        defect_type: row.defect_type,
-        confidence: row.confidence == null ? null : Number(row.confidence),
-        track_id: row.track_id,
-        camera_view: row.camera_view,
-        model_version: row.model_version,
-        created_at: iso(row.created_at),
-      })),
+      recent: recent.rows.map(event),
+      new_events: fresh ? fresh.rows.map(event) : null,
+      spark: spark.rows.map((row) => ({ t: Number(row.t), n: row.n, defect: row.defect })),
       ingest_latency: {
         avg_s: latency.rows[0]?.avg_s == null ? null : Number(latency.rows[0].avg_s),
         max_s: latency.rows[0]?.max_s == null ? null : Number(latency.rows[0].max_s),
